@@ -12,6 +12,46 @@
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
+// G.711 A-law encoding tables and functions
+namespace {
+    const int16_t alaw_compress_table[128] = {
+        1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4,
+        5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
+        6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+        6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
+        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
+    };
+
+    uint8_t linear_to_alaw(int16_t pcm_val) {
+        int16_t mask;
+        int16_t seg;
+        uint8_t aval;
+
+        pcm_val = pcm_val >> 3;
+
+        if (pcm_val >= 0) {
+            mask = 0xD5;
+        } else {
+            mask = 0x55;
+            pcm_val = -pcm_val - 1;
+        }
+
+        if (pcm_val > 32635) pcm_val = 32635;
+
+        if (pcm_val < 256) {
+            aval = pcm_val >> 4;
+        } else {
+            seg = alaw_compress_table[(pcm_val >> 8) & 0x7F];
+            aval = (seg << 4) | ((pcm_val >> (seg + 3)) & 0x0F);
+        }
+
+        return aval ^ mask;
+    }
+}
+
 class AudioStreamer {
 public:
 
@@ -303,18 +343,24 @@ public:
                             memcpy(outputSamples.data(), rawAudio.data(), rawAudio.size());
                         }
                         
-                        // 生成WAV文件
+                        // 生成 G.711 A-law WAV 文件
                         switch_snprintf(finalFilePath, 256, "%s%s%s_%d.wav", SWITCH_GLOBAL_dirs.temp_dir,
                                         SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++);
                         
-                        // 写入WAV文件头和数据
+                        // 将 PCM 转换为 A-law
+                        std::vector<uint8_t> alawData(outputSamples.size());
+                        for (size_t i = 0; i < outputSamples.size(); i++) {
+                            alawData[i] = linear_to_alaw(outputSamples[i]);
+                        }
+                        
+                        // 写入 G.711 A-law WAV 文件头和数据
                         std::ofstream wavFile(finalFilePath, std::ofstream::binary);
                         if (wavFile.is_open()) {
-                            uint32_t dataSize = outputSamples.size() * sizeof(int16_t);
+                            uint32_t dataSize = alawData.size();  // A-law 是 8-bit，每样本 1 字节
                             uint32_t fileSize = 36 + dataSize;
                             uint32_t sampleRate8k = 8000;
                             uint16_t numChannels = 1;
-                            uint16_t bitsPerSample = 16;
+                            uint16_t bitsPerSample = 8;  // A-law 是 8-bit
                             uint32_t byteRate = sampleRate8k * numChannels * bitsPerSample / 8;
                             uint16_t blockAlign = numChannels * bitsPerSample / 8;
                             
@@ -327,7 +373,7 @@ public:
                             wavFile.write("fmt ", 4);
                             uint32_t fmtSize = 16;
                             wavFile.write((char*)&fmtSize, 4);
-                            uint16_t audioFormat = 1; // PCM
+                            uint16_t audioFormat = 6;  // G.711 A-law
                             wavFile.write((char*)&audioFormat, 2);
                             wavFile.write((char*)&numChannels, 2);
                             wavFile.write((char*)&sampleRate8k, 4);
@@ -338,7 +384,7 @@ public:
                             // data chunk
                             wavFile.write("data", 4);
                             wavFile.write((char*)&dataSize, 4);
-                            wavFile.write((char*)outputSamples.data(), dataSize);
+                            wavFile.write((char*)alawData.data(), dataSize);
                             
                             wavFile.close();
                             
@@ -347,7 +393,7 @@ public:
                             cJSON_AddItemToObject(jsonData, "file", jsonFile);
                             
                             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                              "(%s) processMessage - WAV file created: %s (%u bytes)\n",
+                                              "(%s) processMessage - G.711 A-law WAV file created: %s (%u bytes)\n",
                                               m_sessionId.c_str(), finalFilePath, dataSize);
                         } else {
                             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
