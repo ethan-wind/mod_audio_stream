@@ -245,7 +245,6 @@ public:
                                   jsonAudio && jsonAudio->valuestring ? "valid" : "NULL");
 
                 if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
-                    char tempFilePath[256];
                     char finalFilePath[256];
                     std::string rawAudio;
                     try {
@@ -257,65 +256,107 @@ public:
                         return status;
                     }
                     
-                    // 保存原始文件
-                    switch_snprintf(tempFilePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
-                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile, fileType.c_str());
-                    
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) processMessage - saving temp file: %s, size: %zu bytes\n",
-                                      m_sessionId.c_str(), tempFilePath, rawAudio.size());
-                    
-                    std::ofstream fstream(tempFilePath, std::ofstream::binary);
-                    fstream << rawAudio;
-                    fstream.close();
-                    m_Files.insert(tempFilePath);
-                    
-                    // 使用FFmpeg转换为8000Hz WAV
-                    switch_snprintf(finalFilePath, 256, "%s%s%s_%d.wav", SWITCH_GLOBAL_dirs.temp_dir,
-                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++);
-                    
-                    char ffmpegCmd[1024];
-                    if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw")) {
-                        // 对于raw格式，需要指定输入格式
-                        switch_snprintf(ffmpegCmd, 1024, 
-                                        "ffmpeg -f s16le -ar %d -ac 1 -i \"%s\" -ar 8000 -ac 1 -y \"%s\" 2>&1",
-                                        sampleRate, tempFilePath, finalFilePath);
-                    } else {
-                        // 对于其他格式（wav, mp3, ogg），FFmpeg可以自动识别
-                        switch_snprintf(ffmpegCmd, 1024, 
-                                        "ffmpeg -i \"%s\" -ar 8000 -ac 1 -y \"%s\" 2>&1",
-                                        tempFilePath, finalFilePath);
-                    }
-                    
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) processMessage - executing FFmpeg: %s\n",
-                                      m_sessionId.c_str(), ffmpegCmd);
-                    
-                    FILE* pipe = popen(ffmpegCmd, "r");
-                    if (pipe) {
-                        char buffer[256];
-                        std::string ffmpegOutput;
-                        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-                            ffmpegOutput += buffer;
-                        }
-                        int exitCode = pclose(pipe);
+                    // 只处理raw格式的音频，使用SpeexDSP转换为8000Hz
+                    if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw") && sampleRate > 0) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                          "(%s) processMessage - processing raw audio: %d Hz, size: %zu bytes\n",
+                                          m_sessionId.c_str(), sampleRate, rawAudio.size());
                         
-                        if (exitCode == 0) {
+                        std::vector<int16_t> outputSamples;
+                        
+                        // 如果采样率不是8000Hz，需要重采样
+                        if (sampleRate != 8000) {
+                            int err;
+                            SpeexResamplerState* resampler = speex_resampler_init(1, sampleRate, 8000, SWITCH_RESAMPLE_QUALITY, &err);
+                            
+                            if (err == 0 && resampler) {
+                                size_t input_samples = rawAudio.size() / sizeof(int16_t);
+                                size_t output_samples = (input_samples * 8000 + sampleRate - 1) / sampleRate;
+                                
+                                outputSamples.resize(output_samples);
+                                spx_uint32_t in_len = input_samples;
+                                spx_uint32_t out_len = output_samples;
+                                
+                                speex_resampler_process_int(resampler, 0,
+                                                            (const spx_int16_t*)rawAudio.data(),
+                                                            &in_len,
+                                                            outputSamples.data(),
+                                                            &out_len);
+                                
+                                outputSamples.resize(out_len);
+                                speex_resampler_destroy(resampler);
+                                
+                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                                  "(%s) processMessage - resampled from %d to 8000 Hz: %zu -> %zu samples\n",
+                                                  m_sessionId.c_str(), sampleRate, input_samples, out_len);
+                            } else {
+                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                                  "(%s) processMessage - failed to initialize resampler: %s\n",
+                                                  m_sessionId.c_str(), speex_resampler_strerror(err));
+                                cJSON_Delete(jsonAudio); cJSON_Delete(json);
+                                return status;
+                            }
+                        } else {
+                            // 采样率已经是8000Hz，直接使用
+                            size_t samples = rawAudio.size() / sizeof(int16_t);
+                            outputSamples.resize(samples);
+                            memcpy(outputSamples.data(), rawAudio.data(), rawAudio.size());
+                        }
+                        
+                        // 生成WAV文件
+                        switch_snprintf(finalFilePath, 256, "%s%s%s_%d.wav", SWITCH_GLOBAL_dirs.temp_dir,
+                                        SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++);
+                        
+                        // 写入WAV文件头和数据
+                        std::ofstream wavFile(finalFilePath, std::ofstream::binary);
+                        if (wavFile.is_open()) {
+                            uint32_t dataSize = outputSamples.size() * sizeof(int16_t);
+                            uint32_t fileSize = 36 + dataSize;
+                            uint32_t sampleRate8k = 8000;
+                            uint16_t numChannels = 1;
+                            uint16_t bitsPerSample = 16;
+                            uint32_t byteRate = sampleRate8k * numChannels * bitsPerSample / 8;
+                            uint16_t blockAlign = numChannels * bitsPerSample / 8;
+                            
+                            // RIFF header
+                            wavFile.write("RIFF", 4);
+                            wavFile.write((char*)&fileSize, 4);
+                            wavFile.write("WAVE", 4);
+                            
+                            // fmt chunk
+                            wavFile.write("fmt ", 4);
+                            uint32_t fmtSize = 16;
+                            wavFile.write((char*)&fmtSize, 4);
+                            uint16_t audioFormat = 1; // PCM
+                            wavFile.write((char*)&audioFormat, 2);
+                            wavFile.write((char*)&numChannels, 2);
+                            wavFile.write((char*)&sampleRate8k, 4);
+                            wavFile.write((char*)&byteRate, 4);
+                            wavFile.write((char*)&blockAlign, 2);
+                            wavFile.write((char*)&bitsPerSample, 2);
+                            
+                            // data chunk
+                            wavFile.write("data", 4);
+                            wavFile.write((char*)&dataSize, 4);
+                            wavFile.write((char*)outputSamples.data(), dataSize);
+                            
+                            wavFile.close();
+                            
                             m_Files.insert(finalFilePath);
                             jsonFile = cJSON_CreateString(finalFilePath);
                             cJSON_AddItemToObject(jsonData, "file", jsonFile);
                             
                             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                              "(%s) processMessage - FFmpeg conversion successful: %s\n",
-                                              m_sessionId.c_str(), finalFilePath);
+                                              "(%s) processMessage - WAV file created: %s (%u bytes)\n",
+                                              m_sessionId.c_str(), finalFilePath, dataSize);
                         } else {
                             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                              "(%s) processMessage - FFmpeg conversion failed (exit code: %d): %s\n",
-                                              m_sessionId.c_str(), exitCode, ffmpegOutput.c_str());
+                                              "(%s) processMessage - failed to create WAV file: %s\n",
+                                              m_sessionId.c_str(), finalFilePath);
                         }
                     } else {
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                          "(%s) processMessage - failed to execute FFmpeg command\n",
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                          "(%s) processMessage - unsupported audio format, only raw audio is supported\n",
                                           m_sessionId.c_str());
                     }
                 } else {
