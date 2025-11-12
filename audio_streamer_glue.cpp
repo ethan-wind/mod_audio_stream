@@ -199,9 +199,17 @@ public:
                 cJSON* jsonFile = nullptr;
                 cJSON* jsonAudio = cJSON_DetachItemFromObject(jsonData, "audioData");
                 const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
+                
+                // 添加日志：检查接收到的数据
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) processMessage - audioDataType: %s, audioData: %s\n",
+                                  m_sessionId.c_str(), 
+                                  jsAudioDataType ? jsAudioDataType : "NULL",
+                                  jsonAudio && jsonAudio->valuestring ? "present" : "NULL");
+                
                 std::string fileType;
-                int sampleRate;
-                if (0 == strcmp(jsAudioDataType, "raw")) {
+                int sampleRate = 16000;
+                if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw")) {
                     cJSON* jsonSampleRate = cJSON_GetObjectItem(jsonData, "sampleRate");
                     sampleRate = jsonSampleRate && jsonSampleRate->valueint ? jsonSampleRate->valueint : 0;
                     std::unordered_map<int, const char*> sampleRateMap = {
@@ -214,16 +222,27 @@ public:
                     };
                     auto it = sampleRateMap.find(sampleRate);
                     fileType = (it != sampleRateMap.end()) ? it->second : "";
-                } else if (0 == strcmp(jsAudioDataType, "wav")) {
+                    
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                      "(%s) processMessage - raw audio, sampleRate: %d, fileType: %s\n",
+                                      m_sessionId.c_str(), sampleRate, fileType.c_str());
+                } else if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "wav")) {
                     fileType = ".wav";
-                } else if (0 == strcmp(jsAudioDataType, "mp3")) {
+                } else if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "mp3")) {
                     fileType = ".mp3";
-                } else if (0 == strcmp(jsAudioDataType, "ogg")) {
+                } else if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "ogg")) {
                     fileType = ".ogg";
                 } else {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - unsupported audio type: %s\n",
-                                      m_sessionId.c_str(), jsAudioDataType);
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+                                      "(%s) processMessage - unsupported or missing audio type: %s\n",
+                                      m_sessionId.c_str(), jsAudioDataType ? jsAudioDataType : "NULL");
                 }
+                
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) processMessage - fileType determined: %s, jsonAudio: %s\n",
+                                  m_sessionId.c_str(), 
+                                  fileType.empty() ? "EMPTY" : fileType.c_str(),
+                                  jsonAudio && jsonAudio->valuestring ? "valid" : "NULL");
 
                 if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
                     char filePath[256];
@@ -238,20 +257,44 @@ public:
                     }
                     switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
                                     SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
+                    
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                      "(%s) processMessage - saving to file: %s, size: %zu bytes\n",
+                                      m_sessionId.c_str(), filePath, rawAudio.size());
+                    
                     std::ofstream fstream(filePath, std::ofstream::binary);
                     fstream << rawAudio;
                     fstream.close();
                     m_Files.insert(filePath);
                     jsonFile = cJSON_CreateString(filePath);
                     cJSON_AddItemToObject(jsonData, "file", jsonFile);
+                    
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                      "(%s) processMessage - file saved, jsonFile created\n",
+                                      m_sessionId.c_str());
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                      "(%s) processMessage - skipped file creation: jsonAudio=%s, fileType=%s\n",
+                                      m_sessionId.c_str(),
+                                      jsonAudio ? "valid" : "NULL",
+                                      fileType.empty() ? "EMPTY" : fileType.c_str());
                 }
 
                 if(jsonFile) {
                     char *jsonString = cJSON_PrintUnformatted(jsonData);
+                    
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                      "(%s) processMessage - firing EVENT_PLAY: %s\n",
+                                      m_sessionId.c_str(), jsonString);
+                    
                     m_notify(session, EVENT_PLAY, jsonString);
                     message.assign(jsonString);
                     free(jsonString);
                     status = SWITCH_TRUE;
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                      "(%s) processMessage - jsonFile is NULL, EVENT_PLAY not fired\n",
+                                      m_sessionId.c_str());
                 }
                 if (jsonAudio)
                     cJSON_Delete(jsonAudio);
