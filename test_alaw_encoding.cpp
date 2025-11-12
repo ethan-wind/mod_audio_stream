@@ -3,56 +3,53 @@
 #include <cstdint>
 #include <iomanip>
 
+// A-law 段查找表
+static const int16_t seg_aend[8] = {0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF};
+
+// 查找段号
+static int16_t search(int16_t val, const int16_t *table, int16_t size) {
+    for (int16_t i = 0; i < size; i++) {
+        if (val <= *table++)
+            return i;
+    }
+    return size;
+}
+
 // A-law 编码函数
 uint8_t linear_to_alaw(int16_t pcm_val) {
-    uint8_t mask;
-    uint8_t seg;
+    int16_t mask;
+    int16_t seg;
     uint8_t aval;
-    int16_t linear;
 
     if (pcm_val >= 0) {
         mask = 0xD5;
-        linear = pcm_val;
     } else {
         mask = 0x55;
-        linear = -pcm_val - 1;
-        if (linear < 0) linear = 0;
+        pcm_val = -pcm_val - 1;
+        if (pcm_val < 0) {
+            pcm_val = 0;
+        }
     }
 
-    if (linear > 0x7FFF) {
-        linear = 0x7FFF;
+    if (pcm_val > 0x7FFF) {
+        pcm_val = 0x7FFF;
     }
+    
+    pcm_val = pcm_val >> 3;
 
-    linear = linear >> 3;
+    seg = search(pcm_val, seg_aend, 8);
 
-    if (linear <= 0x0F) {
-        seg = 0;
-        aval = linear;
-    } else if (linear <= 0x1F) {
-        seg = 1;
-        aval = (linear >> 1) & 0x0F;
-    } else if (linear <= 0x3F) {
-        seg = 2;
-        aval = (linear >> 2) & 0x0F;
-    } else if (linear <= 0x7F) {
-        seg = 3;
-        aval = (linear >> 3) & 0x0F;
-    } else if (linear <= 0xFF) {
-        seg = 4;
-        aval = (linear >> 4) & 0x0F;
-    } else if (linear <= 0x1FF) {
-        seg = 5;
-        aval = (linear >> 5) & 0x0F;
-    } else if (linear <= 0x3FF) {
-        seg = 6;
-        aval = (linear >> 6) & 0x0F;
+    if (seg >= 8) {
+        return (uint8_t)(0x7F ^ mask);
     } else {
-        seg = 7;
-        aval = (linear >> 7) & 0x0F;
+        aval = (uint8_t)seg << 4;
+        if (seg < 2) {
+            aval |= (pcm_val >> 1) & 0x0F;
+        } else {
+            aval |= (pcm_val >> seg) & 0x0F;
+        }
+        return aval ^ mask;
     }
-
-    aval = (seg << 4) | aval;
-    return aval ^ mask;
 }
 
 // A-law 解码函数（用于验证）
