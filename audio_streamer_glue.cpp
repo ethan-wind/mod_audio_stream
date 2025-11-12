@@ -8,7 +8,7 @@
 #include <switch_buffer.h>
 #include <unordered_map>
 #include <unordered_set>
-// base64.h 已移除 - 直接处理原始二进制数据
+#include "base64.h"
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
@@ -308,8 +308,15 @@ public:
 
                 if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
                     char finalFilePath[256];
-                    // 直接使用原始音频数据，不进行 base64 解码
-                    std::string rawAudio(jsonAudio->valuestring, strlen(jsonAudio->valuestring));
+                    std::string rawAudio;
+                    try {
+                        rawAudio = base64_decode(jsonAudio->valuestring);
+                    } catch (const std::exception& e) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - base64 decode error: %s\n",
+                                          m_sessionId.c_str(), e.what());
+                        cJSON_Delete(jsonAudio); cJSON_Delete(json);
+                        return status;
+                    }
                     
                     // 只处理raw格式的音频，使用SpeexDSP转换为8000Hz
                     if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw") && sampleRate > 0) {
