@@ -245,7 +245,8 @@ public:
                                   jsonAudio && jsonAudio->valuestring ? "valid" : "NULL");
 
                 if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
-                    char filePath[256];
+                    char tempFilePath[256];
+                    char finalFilePath[256];
                     std::string rawAudio;
                     try {
                         rawAudio = base64_decode(jsonAudio->valuestring);
@@ -255,23 +256,68 @@ public:
                         cJSON_Delete(jsonAudio); cJSON_Delete(json);
                         return status;
                     }
-                    switch_snprintf(filePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
-                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++, fileType.c_str());
+                    
+                    // 保存原始文件
+                    switch_snprintf(tempFilePath, 256, "%s%s%s_%d.tmp%s", SWITCH_GLOBAL_dirs.temp_dir,
+                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile, fileType.c_str());
                     
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) processMessage - saving to file: %s, size: %zu bytes\n",
-                                      m_sessionId.c_str(), filePath, rawAudio.size());
+                                      "(%s) processMessage - saving temp file: %s, size: %zu bytes\n",
+                                      m_sessionId.c_str(), tempFilePath, rawAudio.size());
                     
-                    std::ofstream fstream(filePath, std::ofstream::binary);
+                    std::ofstream fstream(tempFilePath, std::ofstream::binary);
                     fstream << rawAudio;
                     fstream.close();
-                    m_Files.insert(filePath);
-                    jsonFile = cJSON_CreateString(filePath);
-                    cJSON_AddItemToObject(jsonData, "file", jsonFile);
+                    m_Files.insert(tempFilePath);
+                    
+                    // 使用FFmpeg转换为8000Hz WAV
+                    switch_snprintf(finalFilePath, 256, "%s%s%s_%d.wav", SWITCH_GLOBAL_dirs.temp_dir,
+                                    SWITCH_PATH_SEPARATOR, m_sessionId.c_str(), m_playFile++);
+                    
+                    char ffmpegCmd[1024];
+                    if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw")) {
+                        // 对于raw格式，需要指定输入格式
+                        switch_snprintf(ffmpegCmd, 1024, 
+                                        "ffmpeg -f s16le -ar %d -ac 1 -i \"%s\" -ar 8000 -ac 1 -y \"%s\" 2>&1",
+                                        sampleRate, tempFilePath, finalFilePath);
+                    } else {
+                        // 对于其他格式（wav, mp3, ogg），FFmpeg可以自动识别
+                        switch_snprintf(ffmpegCmd, 1024, 
+                                        "ffmpeg -i \"%s\" -ar 8000 -ac 1 -y \"%s\" 2>&1",
+                                        tempFilePath, finalFilePath);
+                    }
                     
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) processMessage - file saved, jsonFile created\n",
-                                      m_sessionId.c_str());
+                                      "(%s) processMessage - executing FFmpeg: %s\n",
+                                      m_sessionId.c_str(), ffmpegCmd);
+                    
+                    FILE* pipe = popen(ffmpegCmd, "r");
+                    if (pipe) {
+                        char buffer[256];
+                        std::string ffmpegOutput;
+                        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+                            ffmpegOutput += buffer;
+                        }
+                        int exitCode = pclose(pipe);
+                        
+                        if (exitCode == 0) {
+                            m_Files.insert(finalFilePath);
+                            jsonFile = cJSON_CreateString(finalFilePath);
+                            cJSON_AddItemToObject(jsonData, "file", jsonFile);
+                            
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                              "(%s) processMessage - FFmpeg conversion successful: %s\n",
+                                              m_sessionId.c_str(), finalFilePath);
+                        } else {
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                              "(%s) processMessage - FFmpeg conversion failed (exit code: %d): %s\n",
+                                              m_sessionId.c_str(), exitCode, ffmpegOutput.c_str());
+                        }
+                    } else {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                          "(%s) processMessage - failed to execute FFmpeg command\n",
+                                          m_sessionId.c_str());
+                    }
                 } else {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
                                       "(%s) processMessage - skipped file creation: jsonAudio=%s, fileType=%s\n",
