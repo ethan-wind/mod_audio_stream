@@ -8,46 +8,68 @@
 #include <switch_buffer.h>
 #include <unordered_map>
 #include <unordered_set>
-#include "base64.h"
+// base64.h 已移除 - 直接处理原始二进制数据
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
-// G.711 A-law encoding tables and functions
+// G.711 A-law encoding - Standard ITU-T implementation
 namespace {
-    const int16_t alaw_compress_table[128] = {
-        1, 1, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 4, 4, 4, 4,
-        5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5, 5,
-        6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-        6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6, 6,
-        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7,
-        7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7, 7
-    };
-
+    // A-law 编码：将 16-bit 线性 PCM 转换为 8-bit A-law
     uint8_t linear_to_alaw(int16_t pcm_val) {
-        int16_t mask;
-        int16_t seg;
+        uint8_t mask;
+        uint8_t seg;
         uint8_t aval;
+        int16_t linear;
 
-        pcm_val = pcm_val >> 3;
-
+        // 获取符号位并转换为绝对值
         if (pcm_val >= 0) {
-            mask = 0xD5;
+            mask = 0xD5;  // 正数的符号掩码
+            linear = pcm_val;
         } else {
-            mask = 0x55;
-            pcm_val = -pcm_val - 1;
+            mask = 0x55;  // 负数的符号掩码
+            linear = -pcm_val - 1;
+            if (linear < 0) linear = 0;
         }
 
-        if (pcm_val > 32635) pcm_val = 32635;
-
-        if (pcm_val < 256) {
-            aval = pcm_val >> 4;
-        } else {
-            seg = alaw_compress_table[(pcm_val >> 8) & 0x7F];
-            aval = (seg << 4) | ((pcm_val >> (seg + 3)) & 0x0F);
+        // 限制最大值
+        if (linear > 0x7FFF) {
+            linear = 0x7FFF;
         }
 
+        // 将 16-bit 转换为 13-bit（右移 3 位）
+        linear = linear >> 3;
+
+        // 查找段号（segment）
+        if (linear <= 0x0F) {
+            seg = 0;
+            aval = linear;
+        } else if (linear <= 0x1F) {
+            seg = 1;
+            aval = (linear >> 1) & 0x0F;
+        } else if (linear <= 0x3F) {
+            seg = 2;
+            aval = (linear >> 2) & 0x0F;
+        } else if (linear <= 0x7F) {
+            seg = 3;
+            aval = (linear >> 3) & 0x0F;
+        } else if (linear <= 0xFF) {
+            seg = 4;
+            aval = (linear >> 4) & 0x0F;
+        } else if (linear <= 0x1FF) {
+            seg = 5;
+            aval = (linear >> 5) & 0x0F;
+        } else if (linear <= 0x3FF) {
+            seg = 6;
+            aval = (linear >> 6) & 0x0F;
+        } else {
+            seg = 7;
+            aval = (linear >> 7) & 0x0F;
+        }
+
+        // 组合段号和量化值
+        aval = (seg << 4) | aval;
+
+        // 应用符号掩码并取反偶数位（A-law 标准）
         return aval ^ mask;
     }
 }
@@ -286,15 +308,8 @@ public:
 
                 if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
                     char finalFilePath[256];
-                    std::string rawAudio;
-                    try {
-                        rawAudio = base64_decode(jsonAudio->valuestring);
-                    } catch (const std::exception& e) {
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "(%s) processMessage - base64 decode error: %s\n",
-                                          m_sessionId.c_str(), e.what());
-                        cJSON_Delete(jsonAudio); cJSON_Delete(json);
-                        return status;
-                    }
+                    // 直接使用原始音频数据，不进行 base64 解码
+                    std::string rawAudio(jsonAudio->valuestring, strlen(jsonAudio->valuestring));
                     
                     // 只处理raw格式的音频，使用SpeexDSP转换为8000Hz
                     if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw") && sampleRate > 0) {
