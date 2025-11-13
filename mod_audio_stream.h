@@ -47,7 +47,15 @@ enum notifyEvent_t {
     MESSAGE
 };
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 // 流式播放函数声明
 switch_bool_t stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif //MOD_AUDIO_STREAM_H
