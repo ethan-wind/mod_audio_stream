@@ -723,6 +723,11 @@ extern "C" {
             return SWITCH_TRUE;
         }
 
+        switch_core_session_t *session = switch_core_media_bug_get_session(bug);
+        if (!session) {
+            return SWITCH_TRUE;
+        }
+
         switch_mutex_lock(tech_pvt->play_mutex);
 
         size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
@@ -743,8 +748,9 @@ extern "C" {
                 frame.rate = tech_pvt->sampling;
                 frame.channels = tech_pvt->channels;
                 
-                // 写入 Media Bug（流式播放到通话中）
-                switch_core_media_bug_write_frame(bug, &frame);
+                // 使用 switch_core_session_write_frame 写入音频
+                // 这是正确的方式来播放音频到通话中
+                switch_core_session_write_frame(session, &frame, SWITCH_IO_FLAG_NONE, 0);
             }
         }
 
