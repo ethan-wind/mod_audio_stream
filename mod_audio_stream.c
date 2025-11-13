@@ -45,6 +45,12 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             break;
 
         case SWITCH_ABC_TYPE_WRITE:
+            // 流式播放：从播放缓冲区读取音频并写入通话
+            if (tech_pvt->stream_play_enabled) {
+                return stream_play_frame(bug, tech_pvt);
+            }
+            break;
+            
         default:
             break;
     }
@@ -84,7 +90,10 @@ static switch_status_t start_capture(switch_core_session_t *session,
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
         return SWITCH_STATUS_FALSE;
     }
-    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug.\n");
+    // 添加 WRITE 标志以支持流式播放
+    flags |= SMBF_WRITE_STREAM;
+    
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug with flags: %d\n", flags);
     if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
         return status;
     }

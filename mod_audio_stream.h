@@ -31,6 +31,11 @@ struct private_data {
     char initialMetadata[8192];
     switch_buffer_t *sbuffer;
     int rtp_packets;
+    
+    // 流式播放支持
+    switch_buffer_t *play_buffer;      // 播放缓冲区
+    switch_mutex_t *play_mutex;        // 播放互斥锁
+    int stream_play_enabled:1;         // 启用流式播放
 };
 
 typedef struct private_data private_t;
@@ -41,5 +46,8 @@ enum notifyEvent_t {
     CONNECTION_DROPPED,
     MESSAGE
 };
+
+// 流式播放函数声明
+switch_bool_t stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt);
 
 #endif //MOD_AUDIO_STREAM_H

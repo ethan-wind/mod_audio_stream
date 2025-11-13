@@ -357,9 +357,70 @@ public:
                                           "(%s) processMessage - converted Float32 to 16-bit PCM: %zu samples\n",
                                           m_sessionId.c_str(), input_samples);
                         
+                        // 获取 tech_pvt 用于流式播放
+                        auto *bug = get_media_bug(session);
+                        private_t *tech_pvt = nullptr;
+                        if (bug) {
+                            tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+                        }
+                        
+                        // 步骤 2a: 流式播放 - 重采样到通话采样率并写入播放缓冲区
+                        if (tech_pvt && tech_pvt->stream_play_enabled) {
+                            int target_rate = tech_pvt->sampling;
+                            std::vector<int16_t> playbackSamples;
+                            
+                            if (sampleRate != target_rate) {
+                                int err;
+                                SpeexResamplerState* resampler = speex_resampler_init(1, sampleRate, target_rate, SWITCH_RESAMPLE_QUALITY, &err);
+                                
+                                if (err == 0 && resampler) {
+                                    size_t output_samples = ((uint64_t)input_samples * target_rate + sampleRate - 1) / sampleRate;
+                                    playbackSamples.resize(output_samples);
+                                    spx_uint32_t in_len = input_samples;
+                                    spx_uint32_t out_len = output_samples;
+                                    
+                                    speex_resampler_process_int(resampler, 0,
+                                                                pcm16bit.data(),
+                                                                &in_len,
+                                                                playbackSamples.data(),
+                                                                &out_len);
+                                    
+                                    playbackSamples.resize(out_len);
+                                    speex_resampler_destroy(resampler);
+                                } else {
+                                    playbackSamples = pcm16bit;
+                                }
+                            } else {
+                                playbackSamples = pcm16bit;
+                            }
+                            
+                            // 写入播放缓冲区
+                            switch_mutex_lock(tech_pvt->play_mutex);
+                            size_t data_size = playbackSamples.size() * sizeof(int16_t);
+                            size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
+                            
+                            if (available >= data_size) {
+                                switch_buffer_write(tech_pvt->play_buffer,
+                                                   (uint8_t*)playbackSamples.data(),
+                                                   data_size);
+                                
+                                size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+                                double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+                                
+                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                    "(%s) Streaming playback: queued %zu samples (buffer: %.2f ms)\n",
+                                    m_sessionId.c_str(), playbackSamples.size(), buffer_ms);
+                            } else {
+                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                    "(%s) Play buffer full, dropping %zu samples\n",
+                                    m_sessionId.c_str(), playbackSamples.size());
+                            }
+                            switch_mutex_unlock(tech_pvt->play_mutex);
+                        }
+                        
                         std::vector<int16_t> outputSamples;
                         
-                        // 步骤 2: 如果采样率不是8000Hz，需要重采样
+                        // 步骤 2b: 文件保存 - 重采样到 8000Hz（兼容性）
                         if (sampleRate != 8000) {
                             int err;
                             SpeexResamplerState* resampler = speex_resampler_init(1, sampleRate, 8000, SWITCH_RESAMPLE_QUALITY, &err);
@@ -579,6 +640,26 @@ namespace {
                 "%s: Error creating switch buffer.\n", tech_pvt->sessionId);
             return SWITCH_STATUS_FALSE;
         }
+        
+        // 初始化播放缓冲区（2秒缓冲，用于流式播放）
+        const size_t play_buflen = desiredSampling * channels * sizeof(int16_t) * 2;
+        if (switch_buffer_create(pool, &tech_pvt->play_buffer, play_buflen) != SWITCH_STATUS_SUCCESS) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "%s: Error creating play buffer.\n", tech_pvt->sessionId);
+            return SWITCH_STATUS_FALSE;
+        }
+        
+        // 初始化播放互斥锁
+        switch_mutex_init(&tech_pvt->play_mutex, SWITCH_MUTEX_NESTED, pool);
+        
+        // 默认启用流式播放
+        tech_pvt->stream_play_enabled = 1;
+        
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            "(%s) Stream play enabled with buffer size: %zu bytes (%.2f seconds)\n",
+            tech_pvt->sessionId, play_buflen, 
+            (double)play_buflen / (desiredSampling * channels * sizeof(int16_t)));
+
 
         if (desiredSampling != sampling) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) resampling from %u to %u\n", tech_pvt->sessionId, sampling, desiredSampling);
@@ -607,6 +688,14 @@ namespace {
             switch_mutex_destroy(tech_pvt->mutex);
             tech_pvt->mutex = nullptr;
         }
+        if (tech_pvt->play_mutex) {
+            switch_mutex_destroy(tech_pvt->play_mutex);
+            tech_pvt->play_mutex = nullptr;
+        }
+        if (tech_pvt->play_buffer) {
+            switch_buffer_destroy(&tech_pvt->play_buffer);
+            tech_pvt->play_buffer = nullptr;
+        }
         if (tech_pvt->pAudioStreamer) {
             auto* as = (AudioStreamer *) tech_pvt->pAudioStreamer;
             delete as;
@@ -628,6 +717,41 @@ namespace {
 }
 
 extern "C" {
+    // 流式播放函数：从播放缓冲区读取音频并写入通话
+    switch_bool_t stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
+        if (!tech_pvt || !tech_pvt->play_buffer || !tech_pvt->stream_play_enabled) {
+            return SWITCH_TRUE;
+        }
+
+        switch_mutex_lock(tech_pvt->play_mutex);
+
+        size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+        
+        if (inuse > 0) {
+            // 计算一帧大小（20ms）
+            size_t frame_size = tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t) / 50;
+            
+            if (inuse >= frame_size) {
+                uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+                switch_buffer_read(tech_pvt->play_buffer, data, frame_size);
+                
+                // 准备音频帧
+                switch_frame_t frame = {0};
+                frame.data = data;
+                frame.datalen = frame_size;
+                frame.samples = frame_size / (tech_pvt->channels * sizeof(int16_t));
+                frame.rate = tech_pvt->sampling;
+                frame.channels = tech_pvt->channels;
+                
+                // 写入 Media Bug（流式播放到通话中）
+                switch_core_media_bug_write_frame(bug, &frame);
+            }
+        }
+
+        switch_mutex_unlock(tech_pvt->play_mutex);
+        return SWITCH_TRUE;
+    }
+    
     int validate_ws_uri(const char* url, char* wsUri) {
         const char* scheme = nullptr;
         const char* hostStart = nullptr;
