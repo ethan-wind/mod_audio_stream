@@ -4,6 +4,7 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <cmath>
 #include <speex/speex_resampler.h>
 
 // 小端序写入辅助函数
@@ -149,18 +150,45 @@ int main(int argc, char* argv[]) {
     std::vector<int16_t> pcmData;
     
     if (header.bitsPerSample == 32) {
-        // 32-bit PCM: 读取后转换为 16-bit
-        std::vector<int32_t> pcm32Data(chunkSize / sizeof(int32_t));
-        inFile.read(reinterpret_cast<char*>(pcm32Data.data()), chunkSize);
+        // 32-bit 数据：支持 Float32 和 Int32
+        std::vector<uint8_t> rawData(chunkSize);
+        inFile.read(reinterpret_cast<char*>(rawData.data()), chunkSize);
         inFile.close();
         
-        std::cout << "读取了 " << pcm32Data.size() << " 个 32-bit 样本" << std::endl;
-        std::cout << "转换 32-bit 到 16-bit..." << std::endl;
+        size_t numSamples = chunkSize / sizeof(float);
+        std::cout << "读取了 " << numSamples << " 个 32-bit 样本" << std::endl;
         
-        pcmData.resize(pcm32Data.size());
-        for (size_t i = 0; i < pcm32Data.size(); i++) {
-            // 32-bit 转 16-bit：右移 16 位（保留高 16 位）
-            pcmData[i] = static_cast<int16_t>(pcm32Data[i] >> 16);
+        // 检测是 Float32 还是 Int32
+        const float* floatData = reinterpret_cast<const float*>(rawData.data());
+        const int32_t* int32Data = reinterpret_cast<const int32_t*>(rawData.data());
+        
+        bool isFloat32 = false;
+        if (numSamples > 0) {
+            float firstSample = floatData[0];
+            // Float32 PCM 范围通常在 [-1.0, 1.0]
+            if (firstSample >= -1.5f && firstSample <= 1.5f && std::abs(firstSample) < 32768.0f) {
+                isFloat32 = true;
+            }
+        }
+        
+        pcmData.resize(numSamples);
+        
+        if (isFloat32) {
+            std::cout << "检测到 Float32 格式，转换到 16-bit..." << std::endl;
+            for (size_t i = 0; i < numSamples; i++) {
+                float sample = floatData[i];
+                // 限幅到 [-1.0, 1.0]
+                if (sample > 1.0f) sample = 1.0f;
+                if (sample < -1.0f) sample = -1.0f;
+                // 转换为 16-bit
+                pcmData[i] = static_cast<int16_t>(sample * 32767.0f);
+            }
+        } else {
+            std::cout << "检测到 Int32 格式，转换到 16-bit..." << std::endl;
+            for (size_t i = 0; i < numSamples; i++) {
+                // Int32 转 16-bit：右移 16 位
+                pcmData[i] = static_cast<int16_t>(int32Data[i] >> 16);
+            }
         }
         
         std::cout << "转换完成: " << pcmData.size() << " 个 16-bit 样本" << std::endl;

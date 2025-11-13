@@ -332,22 +332,30 @@ public:
                     // 只处理raw格式的音频，使用SpeexDSP转换为8000Hz
                     if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw") && sampleRate > 0) {
                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                          "(%s) processMessage - processing raw audio: %d Hz, size: %zu bytes (32-bit PCM)\n",
+                                          "(%s) processMessage - processing raw audio: %d Hz, size: %zu bytes (Float32 format)\n",
                                           m_sessionId.c_str(), sampleRate, rawAudio.size());
                         
-                        // 步骤 1: 将 32-bit PCM 转换为 16-bit PCM（小端序）
-                        size_t input_samples_32bit = rawAudio.size() / sizeof(int32_t);
-                        std::vector<int16_t> pcm16bit(input_samples_32bit);
+                        // 步骤 1: 将 Float32 转换为 16-bit PCM（小端序）
+                        // 原始格式：Float32, 24000Hz, 单声道, 小端序
+                        size_t input_samples = rawAudio.size() / sizeof(float);
+                        std::vector<int16_t> pcm16bit(input_samples);
                         
-                        const int32_t* pcm32_data = reinterpret_cast<const int32_t*>(rawAudio.data());
-                        for (size_t i = 0; i < input_samples_32bit; i++) {
-                            // 32-bit 转 16-bit：右移 16 位（保留高 16 位）
-                            pcm16bit[i] = static_cast<int16_t>(pcm32_data[i] >> 16);
+                        const float* float_data = reinterpret_cast<const float*>(rawAudio.data());
+                        
+                        for (size_t i = 0; i < input_samples; i++) {
+                            float sample = float_data[i];
+                            
+                            // Float32 范围通常是 [-1.0, 1.0]，限幅处理
+                            if (sample > 1.0f) sample = 1.0f;
+                            if (sample < -1.0f) sample = -1.0f;
+                            
+                            // 转换为 16-bit PCM: float * 32767
+                            pcm16bit[i] = static_cast<int16_t>(sample * 32767.0f);
                         }
                         
                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                          "(%s) processMessage - converted 32-bit to 16-bit: %zu samples\n",
-                                          m_sessionId.c_str(), input_samples_32bit);
+                                          "(%s) processMessage - converted Float32 to 16-bit PCM: %zu samples\n",
+                                          m_sessionId.c_str(), input_samples);
                         
                         std::vector<int16_t> outputSamples;
                         
@@ -358,10 +366,10 @@ public:
                             
                             if (err == 0 && resampler) {
                                 // 防止溢出：使用 uint64_t 进行中间计算
-                                size_t output_samples = ((uint64_t)input_samples_32bit * 8000 + sampleRate - 1) / sampleRate;
+                                size_t output_samples = ((uint64_t)input_samples * 8000 + sampleRate - 1) / sampleRate;
                                 
                                 outputSamples.resize(output_samples);
-                                spx_uint32_t in_len = input_samples_32bit;
+                                spx_uint32_t in_len = input_samples;
                                 spx_uint32_t out_len = output_samples;
                                 
                                 speex_resampler_process_int(resampler, 0,
@@ -375,7 +383,7 @@ public:
                                 
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                                                   "(%s) processMessage - resampled from %d to 8000 Hz: %zu -> %zu samples\n",
-                                                  m_sessionId.c_str(), sampleRate, input_samples_32bit, out_len);
+                                                  m_sessionId.c_str(), sampleRate, input_samples, out_len);
                             } else {
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                                   "(%s) processMessage - failed to initialize resampler: %s\n",
@@ -388,7 +396,7 @@ public:
                             outputSamples = pcm16bit;
                             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                                               "(%s) processMessage - no resampling needed, using %zu samples\n",
-                                              m_sessionId.c_str(), input_samples_32bit);
+                                              m_sessionId.c_str(), input_samples);
                         }
                         
                         // 生成 G.711 A-law WAV 文件
