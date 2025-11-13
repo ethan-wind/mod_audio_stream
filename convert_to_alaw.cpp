@@ -4,6 +4,24 @@
 #include <vector>
 #include <cstdint>
 #include <cstring>
+#include <speex/speex_resampler.h>
+
+// 小端序写入辅助函数
+inline void write_le16(std::ofstream& file, uint16_t value) {
+    uint8_t bytes[2];
+    bytes[0] = value & 0xFF;
+    bytes[1] = (value >> 8) & 0xFF;
+    file.write((char*)bytes, 2);
+}
+
+inline void write_le32(std::ofstream& file, uint32_t value) {
+    uint8_t bytes[4];
+    bytes[0] = value & 0xFF;
+    bytes[1] = (value >> 8) & 0xFF;
+    bytes[2] = (value >> 16) & 0xFF;
+    bytes[3] = (value >> 24) & 0xFF;
+    file.write((char*)bytes, 4);
+}
 
 // G.711 A-law 编码 - 标准 ITU-T G.711 实现
 static const int16_t seg_aend[8] = {0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF};
@@ -134,10 +152,76 @@ int main(int argc, char* argv[]) {
 
     std::cout << "读取了 " << pcmData.size() << " 个样本" << std::endl;
 
+    // 重采样到 8000 Hz（如果需要）
+    std::vector<int16_t> resampledData;
+    uint32_t outputSampleRate = 8000;
+    
+    if (header.sampleRate != outputSampleRate) {
+        std::cout << "重采样: " << header.sampleRate << " Hz -> " << outputSampleRate << " Hz" << std::endl;
+        
+        int err;
+        SpeexResamplerState* resampler = speex_resampler_init(
+            header.numChannels,
+            header.sampleRate,
+            outputSampleRate,
+            10,  // 质量等级 (0-10, 10最高)
+            &err
+        );
+        
+        if (err != 0 || !resampler) {
+            std::cerr << "错误: 无法初始化重采样器, 错误码: " << err << std::endl;
+            return 1;
+        }
+        
+        // 计算输出样本数
+        uint32_t inputSamples = pcmData.size() / header.numChannels;
+        uint32_t outputSamples = (uint32_t)((uint64_t)inputSamples * outputSampleRate / header.sampleRate);
+        
+        resampledData.resize(outputSamples * header.numChannels);
+        
+        if (header.numChannels == 1) {
+            // 单声道
+            spx_uint32_t in_len = inputSamples;
+            spx_uint32_t out_len = outputSamples;
+            
+            speex_resampler_process_int(
+                resampler,
+                0,
+                pcmData.data(),
+                &in_len,
+                resampledData.data(),
+                &out_len
+            );
+            
+            resampledData.resize(out_len);
+            std::cout << "重采样完成: " << in_len << " -> " << out_len << " 样本" << std::endl;
+        } else {
+            // 多声道交错
+            spx_uint32_t in_len = inputSamples;
+            spx_uint32_t out_len = outputSamples;
+            
+            speex_resampler_process_interleaved_int(
+                resampler,
+                pcmData.data(),
+                &in_len,
+                resampledData.data(),
+                &out_len
+            );
+            
+            resampledData.resize(out_len * header.numChannels);
+            std::cout << "重采样完成: " << in_len << " -> " << out_len << " 样本/声道" << std::endl;
+        }
+        
+        speex_resampler_destroy(resampler);
+    } else {
+        std::cout << "采样率已经是 8000 Hz，无需重采样" << std::endl;
+        resampledData = pcmData;
+    }
+
     // 转换为 A-law
-    std::vector<uint8_t> alawData(pcmData.size());
-    for (size_t i = 0; i < pcmData.size(); i++) {
-        alawData[i] = linear_to_alaw(pcmData[i]);
+    std::vector<uint8_t> alawData(resampledData.size());
+    for (size_t i = 0; i < resampledData.size(); i++) {
+        alawData[i] = linear_to_alaw(resampledData[i]);
     }
 
     // 写入 A-law WAV 文件
@@ -150,36 +234,34 @@ int main(int argc, char* argv[]) {
     uint32_t dataSize = alawData.size();
     uint32_t fileSize = 36 + dataSize;
     uint16_t bitsPerSample = 8;
-    uint32_t byteRate = header.sampleRate * header.numChannels * bitsPerSample / 8;
+    uint32_t byteRate = outputSampleRate * header.numChannels * bitsPerSample / 8;
     uint16_t blockAlign = header.numChannels * bitsPerSample / 8;
 
-    // RIFF header
+    // RIFF header (小端序)
     outFile.write("RIFF", 4);
-    outFile.write(reinterpret_cast<char*>(&fileSize), 4);
+    write_le32(outFile, fileSize);
     outFile.write("WAVE", 4);
 
-    // fmt chunk
+    // fmt chunk (小端序)
     outFile.write("fmt ", 4);
-    uint32_t fmtSize = 16;
-    outFile.write(reinterpret_cast<char*>(&fmtSize), 4);
-    uint16_t audioFormat = 6;  // G.711 A-law
-    outFile.write(reinterpret_cast<char*>(&audioFormat), 2);
-    outFile.write(reinterpret_cast<char*>(&header.numChannels), 2);
-    outFile.write(reinterpret_cast<char*>(&header.sampleRate), 4);
-    outFile.write(reinterpret_cast<char*>(&byteRate), 4);
-    outFile.write(reinterpret_cast<char*>(&blockAlign), 2);
-    outFile.write(reinterpret_cast<char*>(&bitsPerSample), 2);
+    write_le32(outFile, 16);  // fmtSize
+    write_le16(outFile, 6);   // audioFormat: G.711 A-law
+    write_le16(outFile, header.numChannels);
+    write_le32(outFile, outputSampleRate);
+    write_le32(outFile, byteRate);
+    write_le16(outFile, blockAlign);
+    write_le16(outFile, bitsPerSample);
 
-    // data chunk
+    // data chunk (小端序)
     outFile.write("data", 4);
-    outFile.write(reinterpret_cast<char*>(&dataSize), 4);
+    write_le32(outFile, dataSize);
     outFile.write(reinterpret_cast<char*>(alawData.data()), dataSize);
 
     outFile.close();
 
     std::cout << "成功创建 G.711 A-law WAV 文件: " << outputFile << std::endl;
     std::cout << "  格式: G.711 A-law" << std::endl;
-    std::cout << "  采样率: " << header.sampleRate << " Hz" << std::endl;
+    std::cout << "  采样率: " << outputSampleRate << " Hz" << std::endl;
     std::cout << "  声道数: " << header.numChannels << std::endl;
     std::cout << "  位深度: 8 bit" << std::endl;
     std::cout << "  文件大小: " << (fileSize + 8) << " 字节" << std::endl;

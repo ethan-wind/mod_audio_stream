@@ -14,6 +14,23 @@
 
 // G.711 A-law encoding - Standard ITU-T G.711 implementation
 namespace {
+    // 小端序写入辅助函数
+    inline void write_le16(std::ofstream& file, uint16_t value) {
+        uint8_t bytes[2];
+        bytes[0] = value & 0xFF;
+        bytes[1] = (value >> 8) & 0xFF;
+        file.write((char*)bytes, 2);
+    }
+    
+    inline void write_le32(std::ofstream& file, uint32_t value) {
+        uint8_t bytes[4];
+        bytes[0] = value & 0xFF;
+        bytes[1] = (value >> 8) & 0xFF;
+        bytes[2] = (value >> 16) & 0xFF;
+        bytes[3] = (value >> 24) & 0xFF;
+        file.write((char*)bytes, 4);
+    }
+    
     // A-law 段查找表
     static const int16_t seg_aend[8] = {0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF};
     
@@ -369,37 +386,39 @@ public:
                             alawData[i] = linear_to_alaw(outputSamples[i]);
                         }
                         
-                        // 写入 G.711 A-law WAV 文件头和数据
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                          "(%s) processMessage - converted %zu samples to A-law\n",
+                                          m_sessionId.c_str(), outputSamples.size());
+                        
+                        // 写入 G.711 A-law WAV 文件头和数据（小端序）
                         std::ofstream wavFile(finalFilePath, std::ofstream::binary);
                         if (wavFile.is_open()) {
                             uint32_t dataSize = alawData.size();  // A-law 是 8-bit，每样本 1 字节
                             uint32_t fileSize = 36 + dataSize;
-                            uint32_t sampleRate8k = 8000;
+                            uint32_t outputSampleRate = 8000;  // 固定输出 8000 Hz
                             uint16_t numChannels = 1;
                             uint16_t bitsPerSample = 8;  // A-law 是 8-bit
-                            uint32_t byteRate = sampleRate8k * numChannels * bitsPerSample / 8;
+                            uint32_t byteRate = outputSampleRate * numChannels * bitsPerSample / 8;
                             uint16_t blockAlign = numChannels * bitsPerSample / 8;
                             
-                            // RIFF header
+                            // RIFF header (小端序)
                             wavFile.write("RIFF", 4);
-                            wavFile.write((char*)&fileSize, 4);
+                            write_le32(wavFile, fileSize);
                             wavFile.write("WAVE", 4);
                             
-                            // fmt chunk
+                            // fmt chunk (小端序)
                             wavFile.write("fmt ", 4);
-                            uint32_t fmtSize = 16;
-                            wavFile.write((char*)&fmtSize, 4);
-                            uint16_t audioFormat = 6;  // G.711 A-law
-                            wavFile.write((char*)&audioFormat, 2);
-                            wavFile.write((char*)&numChannels, 2);
-                            wavFile.write((char*)&sampleRate8k, 4);
-                            wavFile.write((char*)&byteRate, 4);
-                            wavFile.write((char*)&blockAlign, 2);
-                            wavFile.write((char*)&bitsPerSample, 2);
+                            write_le32(wavFile, 16);  // fmtSize
+                            write_le16(wavFile, 6);   // audioFormat: G.711 A-law
+                            write_le16(wavFile, numChannels);
+                            write_le32(wavFile, outputSampleRate);
+                            write_le32(wavFile, byteRate);
+                            write_le16(wavFile, blockAlign);
+                            write_le16(wavFile, bitsPerSample);
                             
-                            // data chunk
+                            // data chunk (小端序)
                             wavFile.write("data", 4);
-                            wavFile.write((char*)&dataSize, 4);
+                            write_le32(wavFile, dataSize);
                             wavFile.write((char*)alawData.data(), dataSize);
                             
                             wavFile.close();
@@ -409,8 +428,8 @@ public:
                             cJSON_AddItemToObject(jsonData, "file", jsonFile);
                             
                             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                              "(%s) processMessage - G.711 A-law WAV file created: %s (%u bytes)\n",
-                                              m_sessionId.c_str(), finalFilePath, dataSize);
+                                              "(%s) processMessage - G.711 A-law WAV file created: %s (8000 Hz, %u bytes, %zu samples)\n",
+                                              m_sessionId.c_str(), finalFilePath, dataSize, outputSamples.size());
                         } else {
                             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                               "(%s) processMessage - failed to create WAV file: %s\n",
