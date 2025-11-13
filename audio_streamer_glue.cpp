@@ -332,26 +332,40 @@ public:
                     // 只处理raw格式的音频，使用SpeexDSP转换为8000Hz
                     if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw") && sampleRate > 0) {
                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                          "(%s) processMessage - processing raw audio: %d Hz, size: %zu bytes\n",
+                                          "(%s) processMessage - processing raw audio: %d Hz, size: %zu bytes (32-bit PCM)\n",
                                           m_sessionId.c_str(), sampleRate, rawAudio.size());
+                        
+                        // 步骤 1: 将 32-bit PCM 转换为 16-bit PCM（小端序）
+                        size_t input_samples_32bit = rawAudio.size() / sizeof(int32_t);
+                        std::vector<int16_t> pcm16bit(input_samples_32bit);
+                        
+                        const int32_t* pcm32_data = reinterpret_cast<const int32_t*>(rawAudio.data());
+                        for (size_t i = 0; i < input_samples_32bit; i++) {
+                            // 32-bit 转 16-bit：右移 16 位（保留高 16 位）
+                            pcm16bit[i] = static_cast<int16_t>(pcm32_data[i] >> 16);
+                        }
+                        
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                          "(%s) processMessage - converted 32-bit to 16-bit: %zu samples\n",
+                                          m_sessionId.c_str(), input_samples_32bit);
                         
                         std::vector<int16_t> outputSamples;
                         
-                        // 如果采样率不是8000Hz，需要重采样
+                        // 步骤 2: 如果采样率不是8000Hz，需要重采样
                         if (sampleRate != 8000) {
                             int err;
                             SpeexResamplerState* resampler = speex_resampler_init(1, sampleRate, 8000, SWITCH_RESAMPLE_QUALITY, &err);
                             
                             if (err == 0 && resampler) {
-                                size_t input_samples = rawAudio.size() / sizeof(int16_t);
-                                size_t output_samples = (input_samples * 8000 + sampleRate - 1) / sampleRate;
+                                // 防止溢出：使用 uint64_t 进行中间计算
+                                size_t output_samples = ((uint64_t)input_samples_32bit * 8000 + sampleRate - 1) / sampleRate;
                                 
                                 outputSamples.resize(output_samples);
-                                spx_uint32_t in_len = input_samples;
+                                spx_uint32_t in_len = input_samples_32bit;
                                 spx_uint32_t out_len = output_samples;
                                 
                                 speex_resampler_process_int(resampler, 0,
-                                                            (const spx_int16_t*)rawAudio.data(),
+                                                            pcm16bit.data(),
                                                             &in_len,
                                                             outputSamples.data(),
                                                             &out_len);
@@ -361,7 +375,7 @@ public:
                                 
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                                                   "(%s) processMessage - resampled from %d to 8000 Hz: %zu -> %zu samples\n",
-                                                  m_sessionId.c_str(), sampleRate, input_samples, out_len);
+                                                  m_sessionId.c_str(), sampleRate, input_samples_32bit, out_len);
                             } else {
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                                   "(%s) processMessage - failed to initialize resampler: %s\n",
@@ -370,10 +384,11 @@ public:
                                 return status;
                             }
                         } else {
-                            // 采样率已经是8000Hz，直接使用
-                            size_t samples = rawAudio.size() / sizeof(int16_t);
-                            outputSamples.resize(samples);
-                            memcpy(outputSamples.data(), rawAudio.data(), rawAudio.size());
+                            // 采样率已经是8000Hz，直接使用 16-bit 数据
+                            outputSamples = pcm16bit;
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                              "(%s) processMessage - no resampling needed, using %zu samples\n",
+                                              m_sessionId.c_str(), input_samples_32bit);
                         }
                         
                         // 生成 G.711 A-law WAV 文件
@@ -394,10 +409,10 @@ public:
                         std::ofstream wavFile(finalFilePath, std::ofstream::binary);
                         if (wavFile.is_open()) {
                             uint32_t dataSize = alawData.size();  // A-law 是 8-bit，每样本 1 字节
-                            uint32_t fileSize = 36 + dataSize;
-                            uint32_t outputSampleRate = 8000;  // 固定输出 8000 Hz
+                            uint32_t fileSize = 38 + dataSize;    // 使用 fmt size=18 时，总大小为 38+dataSize
+                            uint32_t outputSampleRate = 8000;     // 固定输出 8000 Hz
                             uint16_t numChannels = 1;
-                            uint16_t bitsPerSample = 8;  // A-law 是 8-bit
+                            uint16_t bitsPerSample = 8;           // A-law 是 8-bit
                             uint32_t byteRate = outputSampleRate * numChannels * bitsPerSample / 8;
                             uint16_t blockAlign = numChannels * bitsPerSample / 8;
                             
@@ -406,15 +421,16 @@ public:
                             write_le32(wavFile, fileSize);
                             wavFile.write("WAVE", 4);
                             
-                            // fmt chunk (小端序)
+                            // fmt chunk (小端序) - 使用标准建议的 size=18
                             wavFile.write("fmt ", 4);
-                            write_le32(wavFile, 16);  // fmtSize
+                            write_le32(wavFile, 18);  // fmtSize: 标准建议为 18
                             write_le16(wavFile, 6);   // audioFormat: G.711 A-law
                             write_le16(wavFile, numChannels);
                             write_le32(wavFile, outputSampleRate);
                             write_le32(wavFile, byteRate);
                             write_le16(wavFile, blockAlign);
                             write_le16(wavFile, bitsPerSample);
+                            write_le16(wavFile, 0);   // cbSize: 扩展字段大小为 0
                             
                             // data chunk (小端序)
                             wavFile.write("data", 4);

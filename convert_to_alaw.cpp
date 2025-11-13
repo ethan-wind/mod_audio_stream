@@ -124,8 +124,8 @@ int main(int argc, char* argv[]) {
         return 1;
     }
 
-    if (header.bitsPerSample != 16) {
-        std::cerr << "错误: 输入文件必须是 16-bit PCM" << std::endl;
+    if (header.bitsPerSample != 16 && header.bitsPerSample != 32) {
+        std::cerr << "错误: 输入文件必须是 16-bit 或 32-bit PCM" << std::endl;
         return 1;
     }
 
@@ -145,12 +145,33 @@ int main(int argc, char* argv[]) {
         inFile.seekg(chunkSize, std::ios::cur);
     }
 
-    // 读取 PCM 数据
-    std::vector<int16_t> pcmData(chunkSize / sizeof(int16_t));
-    inFile.read(reinterpret_cast<char*>(pcmData.data()), chunkSize);
-    inFile.close();
-
-    std::cout << "读取了 " << pcmData.size() << " 个样本" << std::endl;
+    // 读取 PCM 数据并转换为 16-bit
+    std::vector<int16_t> pcmData;
+    
+    if (header.bitsPerSample == 32) {
+        // 32-bit PCM: 读取后转换为 16-bit
+        std::vector<int32_t> pcm32Data(chunkSize / sizeof(int32_t));
+        inFile.read(reinterpret_cast<char*>(pcm32Data.data()), chunkSize);
+        inFile.close();
+        
+        std::cout << "读取了 " << pcm32Data.size() << " 个 32-bit 样本" << std::endl;
+        std::cout << "转换 32-bit 到 16-bit..." << std::endl;
+        
+        pcmData.resize(pcm32Data.size());
+        for (size_t i = 0; i < pcm32Data.size(); i++) {
+            // 32-bit 转 16-bit：右移 16 位（保留高 16 位）
+            pcmData[i] = static_cast<int16_t>(pcm32Data[i] >> 16);
+        }
+        
+        std::cout << "转换完成: " << pcmData.size() << " 个 16-bit 样本" << std::endl;
+    } else {
+        // 16-bit PCM: 直接读取
+        pcmData.resize(chunkSize / sizeof(int16_t));
+        inFile.read(reinterpret_cast<char*>(pcmData.data()), chunkSize);
+        inFile.close();
+        
+        std::cout << "读取了 " << pcmData.size() << " 个 16-bit 样本" << std::endl;
+    }
 
     // 重采样到 8000 Hz（如果需要）
     std::vector<int16_t> resampledData;
@@ -173,9 +194,9 @@ int main(int argc, char* argv[]) {
             return 1;
         }
         
-        // 计算输出样本数
+        // 计算输出样本数（防止溢出：使用 uint64_t 进行中间计算）
         uint32_t inputSamples = pcmData.size() / header.numChannels;
-        uint32_t outputSamples = (uint32_t)((uint64_t)inputSamples * outputSampleRate / header.sampleRate);
+        uint32_t outputSamples = (uint32_t)(((uint64_t)inputSamples * outputSampleRate + header.sampleRate - 1) / header.sampleRate);
         
         resampledData.resize(outputSamples * header.numChannels);
         
@@ -232,7 +253,7 @@ int main(int argc, char* argv[]) {
     }
 
     uint32_t dataSize = alawData.size();
-    uint32_t fileSize = 36 + dataSize;
+    uint32_t fileSize = 38 + dataSize;  // 使用 fmt size=18 时，总大小为 38+dataSize
     uint16_t bitsPerSample = 8;
     uint32_t byteRate = outputSampleRate * header.numChannels * bitsPerSample / 8;
     uint16_t blockAlign = header.numChannels * bitsPerSample / 8;
@@ -242,15 +263,16 @@ int main(int argc, char* argv[]) {
     write_le32(outFile, fileSize);
     outFile.write("WAVE", 4);
 
-    // fmt chunk (小端序)
+    // fmt chunk (小端序) - 使用标准建议的 size=18
     outFile.write("fmt ", 4);
-    write_le32(outFile, 16);  // fmtSize
+    write_le32(outFile, 18);  // fmtSize: 标准建议为 18
     write_le16(outFile, 6);   // audioFormat: G.711 A-law
     write_le16(outFile, header.numChannels);
     write_le32(outFile, outputSampleRate);
     write_le32(outFile, byteRate);
     write_le16(outFile, blockAlign);
     write_le16(outFile, bitsPerSample);
+    write_le16(outFile, 0);   // cbSize: 扩展字段大小为 0
 
     // data chunk (小端序)
     outFile.write("data", 4);
