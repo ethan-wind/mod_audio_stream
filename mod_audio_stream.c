@@ -41,11 +41,17 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             if (tech_pvt->close_requested) {
                 return SWITCH_FALSE;
             }
-            return stream_frame(bug);
+            // 处理下行（FreeSWITCH → 客户端）
+            stream_frame(bug);
+            // 同时处理上行播放（客户端 → FreeSWITCH）
+            if (tech_pvt->stream_play_enabled) {
+                stream_play_frame(bug, tech_pvt);
+            }
+            return SWITCH_TRUE;
             break;
 
         case SWITCH_ABC_TYPE_WRITE:
-            // 流式播放：从播放缓冲区读取音频并写入通话
+            // WRITE 事件也处理播放
             if (tech_pvt->stream_play_enabled) {
                 return stream_play_frame(bug, tech_pvt);
             }

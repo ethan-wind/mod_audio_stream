@@ -719,7 +719,15 @@ namespace {
 extern "C" {
     // 流式播放函数：从播放缓冲区读取音频并写入通话
     switch_bool_t stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
-        if (!tech_pvt || !tech_pvt->play_buffer || !tech_pvt->stream_play_enabled) {
+        if (!tech_pvt) {
+            return SWITCH_TRUE;
+        }
+        
+        if (!tech_pvt->play_buffer) {
+            return SWITCH_TRUE;
+        }
+        
+        if (!tech_pvt->stream_play_enabled) {
             return SWITCH_TRUE;
         }
 
@@ -749,8 +757,17 @@ extern "C" {
                 frame.channels = tech_pvt->channels;
                 
                 // 使用 switch_core_session_write_frame 写入音频
-                // 这是正确的方式来播放音频到通话中
-                switch_core_session_write_frame(session, &frame, SWITCH_IO_FLAG_NONE, 0);
+                switch_status_t status = switch_core_session_write_frame(session, &frame, SWITCH_IO_FLAG_NONE, 0);
+                
+                if (status == SWITCH_STATUS_SUCCESS) {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                        "(%s) Played %zu samples from buffer (remaining: %zu bytes)\n",
+                        tech_pvt->sessionId, frame.samples, switch_buffer_inuse(tech_pvt->play_buffer));
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                        "(%s) Failed to write frame, status: %d\n",
+                        tech_pvt->sessionId, status);
+                }
             }
         }
 
