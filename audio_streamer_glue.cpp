@@ -780,7 +780,7 @@ extern "C" {
                               tech_pvt->sessionId);
         }
 
-        switch_core_media_bug_write_frame(bug, &frame);
+        switch_core_media_bug_set_write_replace_frame(bug, &frame);
         return SWITCH_TRUE;
     }
     
