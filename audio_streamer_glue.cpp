@@ -408,12 +408,14 @@ public:
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                                 
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                    "(%s) Streaming playback: queued %zu samples (buffer: %.2f ms)\n",
-                                    m_sessionId.c_str(), playbackSamples.size(), buffer_ms);
+                                    "(%s) Streaming playback: queued %zu samples (buffer: %.2f ms, available: %zu bytes)\n",
+                                    m_sessionId.c_str(), playbackSamples.size(), buffer_ms, available);
                             } else {
+                                size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+                                double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                                    "(%s) Play buffer full, dropping %zu samples\n",
-                                    m_sessionId.c_str(), playbackSamples.size());
+                                    "(%s) Play buffer full (%.2f ms), dropping %zu samples (need %zu bytes, available %zu bytes)\n",
+                                    m_sessionId.c_str(), buffer_ms, playbackSamples.size(), data_size, available);
                             }
                             switch_mutex_unlock(tech_pvt->play_mutex);
                         }
@@ -641,8 +643,8 @@ namespace {
             return SWITCH_STATUS_FALSE;
         }
         
-        // 初始化播放缓冲区（2秒缓冲，用于流式播放）
-        const size_t play_buflen = desiredSampling * channels * sizeof(int16_t) * 2;
+        // 初始化播放缓冲区（10秒缓冲，用于流式播放，防止突发音频丢失）
+        const size_t play_buflen = desiredSampling * channels * sizeof(int16_t) * 10;
         if (switch_buffer_create(pool, &tech_pvt->play_buffer, play_buflen) != SWITCH_STATUS_SUCCESS) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                 "%s: Error creating play buffer.\n", tech_pvt->sessionId);
@@ -731,14 +733,37 @@ namespace {
 extern "C" {
     // 流式播放函数：从播放缓冲区读取音频并注入到通话中（WRITE_REPLACE）
     void stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
-        if (!tech_pvt || !tech_pvt->play_buffer || !tech_pvt->stream_play_enabled) {
+        switch_core_session_t *session = switch_core_media_bug_get_session(bug);
+        
+        if (!tech_pvt) {
+            if (session) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                  "stream_play_frame: tech_pvt is NULL\n");
+            }
+            return;
+        }
+        
+        if (!tech_pvt->play_buffer) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                              "(%s) stream_play_frame: play_buffer is NULL\n",
+                              tech_pvt->sessionId);
+            return;
+        }
+        
+        if (!tech_pvt->stream_play_enabled) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                              "(%s) stream_play_frame: stream_play_enabled is 0\n",
+                              tech_pvt->sessionId);
             return;
         }
 
-        switch_core_session_t *session = switch_core_media_bug_get_session(bug);
         if (!session) {
             return;
         }
+        
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                          "(%s) stream_play_frame: called\n",
+                          tech_pvt->sessionId);
 
         // 从 media bug 获取写方向的替换帧，如果为空则退回到本地预分配的 write_frame
         switch_frame_t *out_frame = switch_core_media_bug_get_write_replace_frame(bug);

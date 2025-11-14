@@ -49,11 +49,12 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             return SWITCH_TRUE;
             break;
 
+        case SWITCH_ABC_TYPE_WRITE:
         case SWITCH_ABC_TYPE_WRITE_REPLACE:
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) capture_callback WRITE/WRITE_REPLACE (type=%d) - stream_play_enabled=%d\n",
+                              tech_pvt->sessionId, type, tech_pvt->stream_play_enabled);
             if (tech_pvt->stream_play_enabled) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                                  "(%s) capture_callback WRITE_REPLACE\n",
-                                  tech_pvt->sessionId);
                 stream_play_frame(bug, tech_pvt);
             }
             return SWITCH_TRUE;
