@@ -602,6 +602,11 @@ private:
 };
 
 
+// 前置声明播放线程函数
+extern "C" {
+    static void* SWITCH_THREAD_FUNC play_thread_run(switch_thread_t *thread, void *obj);
+}
+
 namespace {
 
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
