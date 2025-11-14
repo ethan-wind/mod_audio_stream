@@ -654,6 +654,18 @@ namespace {
         
         // 默认启用流式播放
         tech_pvt->stream_play_enabled = 1;
+
+        tech_pvt->write_frame_data = (uint8_t*)switch_core_session_alloc(session, SWITCH_RECOMMENDED_BUFFER_SIZE);
+        if (!tech_pvt->write_frame_data) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "%s: Failed to allocate write frame buffer.\n", tech_pvt->sessionId);
+            return SWITCH_STATUS_FALSE;
+        }
+        memset(&tech_pvt->write_frame, 0, sizeof(tech_pvt->write_frame));
+        tech_pvt->write_frame.data = tech_pvt->write_frame_data;
+        tech_pvt->write_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+        tech_pvt->write_frame.rate = desiredSampling;
+        tech_pvt->write_frame.channels = channels;
         
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
             "(%s) Stream play enabled with buffer size: %zu bytes (%.2f seconds)\n",
@@ -744,6 +756,22 @@ extern "C" {
             return SWITCH_TRUE;
         }
 
+        switch_frame_t *out_frame = &tech_pvt->write_frame;
+        if (!out_frame->data) {
+            return SWITCH_TRUE;
+        }
+
+        size_t copy_len = frame.datalen;
+        if (copy_len > out_frame->buflen) {
+            copy_len = out_frame->buflen;
+        }
+        memcpy(out_frame->data, frame.data, copy_len);
+        out_frame->datalen = copy_len;
+        out_frame->samples = frame.samples;
+        out_frame->rate = frame.rate;
+        out_frame->channels = frame.channels;
+        out_frame->timestamp = frame.timestamp;
+
         bool injected = false;
 
         switch_mutex_lock(tech_pvt->play_mutex);
@@ -757,16 +785,17 @@ extern "C" {
                 read_size = inuse;
             }
 
-            switch_buffer_read(tech_pvt->play_buffer, frame.data, read_size);
+            switch_buffer_read(tech_pvt->play_buffer, out_frame->data, read_size);
             injected = true;
 
             if (read_size < target_bytes) {
-                memset((uint8_t*)frame.data + read_size, 0, target_bytes - read_size);
+                memset((uint8_t*)out_frame->data + read_size, 0, target_bytes - read_size);
             }
 
-            frame.samples = frame.datalen / (tech_pvt->channels * sizeof(int16_t));
-            frame.rate = tech_pvt->sampling;
-            frame.channels = tech_pvt->channels;
+            out_frame->datalen = target_bytes;
+            out_frame->samples = target_bytes / (tech_pvt->channels * sizeof(int16_t));
+            out_frame->rate = tech_pvt->sampling;
+            out_frame->channels = tech_pvt->channels;
 
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
                               "(%s) Injected %zu bytes from play buffer (remaining: %zu bytes)\n",
@@ -780,7 +809,7 @@ extern "C" {
                               tech_pvt->sessionId);
         }
 
-        switch_core_media_bug_set_write_replace_frame(bug, &frame);
+        switch_core_media_bug_set_write_replace_frame(bug, out_frame);
         return SWITCH_TRUE;
     }
     

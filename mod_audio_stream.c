@@ -98,6 +98,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
     }
     // 添加 WRITE_REPLACE 标志以支持流式播放（将音频注入到通话中，让对方听到）
     flags |= SMBF_WRITE_REPLACE;
+    flags |= SMBF_WRITE_STREAM;
     
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug with flags: %d\n", flags);
     if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
