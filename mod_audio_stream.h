@@ -38,6 +38,7 @@ struct private_data {
     int stream_play_enabled:1;         // 启用流式播放
     switch_frame_t write_frame;        // WRITE_REPLACE 输出帧
     uint8_t *write_frame_data;         // WRITE_REPLACE 帧缓冲
+    uint64_t play_frame_count;         // 播放帧计数器（用于速率控制）
     
     // 播放线程支持
     switch_thread_t *play_thread;      // 播放线程
