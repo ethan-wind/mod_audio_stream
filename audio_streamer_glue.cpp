@@ -730,14 +730,14 @@ namespace {
 
 extern "C" {
     // 流式播放函数：从播放缓冲区读取音频并注入到通话中（WRITE_REPLACE模式）
-    switch_bool_t stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
+    void stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
         if (!tech_pvt || !tech_pvt->play_buffer || !tech_pvt->stream_play_enabled) {
-            return SWITCH_TRUE;
+            return;
         }
 
         switch_core_session_t *session = switch_core_media_bug_get_session(bug);
         if (!session) {
-            return SWITCH_TRUE;
+            return;
         }
 
         uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
@@ -749,11 +749,11 @@ extern "C" {
                           "(%s) stream_play_frame invoked\n", tech_pvt->sessionId);
 
         if (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
-            return SWITCH_TRUE;
+            return;
         }
 
         if (!frame.datalen) {
-            return SWITCH_TRUE;
+            return;
         }
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
                           "(%s) stream_play_frame received frame %u bytes\n",
@@ -761,7 +761,7 @@ extern "C" {
 
         switch_frame_t *out_frame = &tech_pvt->write_frame;
         if (!out_frame->data) {
-            return SWITCH_TRUE;
+            return;
         }
 
         size_t copy_len = frame.datalen;
@@ -800,7 +800,7 @@ extern "C" {
             out_frame->rate = tech_pvt->sampling;
             out_frame->channels = tech_pvt->channels;
 
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                               "(%s) stream_play_frame injected %zu/%zu bytes (buffer left: %.2f ms)\n",
                               tech_pvt->sessionId,
                               read_size,
@@ -817,7 +817,6 @@ extern "C" {
         }
 
         switch_core_media_bug_set_write_replace_frame(bug, out_frame);
-        return SWITCH_TRUE;
     }
     
     int validate_ws_uri(const char* url, char* wsUri) {

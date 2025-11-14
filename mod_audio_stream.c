@@ -51,7 +51,8 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
                                   "(%s) capture_callback type=%d stream_play\n",
                                   tech_pvt->sessionId, type);
-                return stream_play_frame(bug, tech_pvt);
+                stream_play_frame(bug, tech_pvt);
+                return SWITCH_TRUE;
             }
             break;
             
