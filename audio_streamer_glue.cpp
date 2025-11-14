@@ -408,8 +408,8 @@ public:
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                                 
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                    "(%s) Streaming playback: queued %zu samples (buffer: %.2f ms, available: %zu bytes)\n",
-                                    m_sessionId.c_str(), playbackSamples.size(), buffer_ms, available);
+                                    "(%s) Streaming playback: queued %zu samples @ %d Hz (buffer: %.2f ms, available: %zu bytes)\n",
+                                    m_sessionId.c_str(), playbackSamples.size(), target_rate, buffer_ms, available);
                             } else {
                                 size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
@@ -772,14 +772,14 @@ extern "C" {
                           "(%s) stream_play_frame: called\n",
                           tech_pvt->sessionId);
 
-        // 从 media bug 获取读方向的替换帧（发送给对方的音频）
-        switch_frame_t *out_frame = switch_core_media_bug_get_read_replace_frame(bug);
+        // 从 media bug 获取写方向的替换帧（播放给线路的音频）
+        switch_frame_t *out_frame = switch_core_media_bug_get_write_replace_frame(bug);
         if (!out_frame) {
             out_frame = &tech_pvt->write_frame;
         }
         if (!out_frame->data || !out_frame->buflen) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame: no valid read_replace_frame buffer\n",
+                              "(%s) stream_play_frame: no valid write_replace_frame buffer\n",
                               tech_pvt->sessionId);
             return;
         }
@@ -816,11 +816,14 @@ extern "C" {
             out_frame->rate = tech_pvt->sampling;
             out_frame->channels = tech_pvt->channels;
 
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame injected %zu/%zu bytes (buffer left: %.2f ms)\n",
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) stream_play_frame injected %zu/%zu bytes, %u samples @ %d Hz, %d ch (buffer left: %.2f ms)\n",
                               tech_pvt->sessionId,
                               read_size,
                               target_bytes,
+                              out_frame->samples,
+                              out_frame->rate,
+                              out_frame->channels,
                               (double)switch_buffer_inuse(tech_pvt->play_buffer) /
                               (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0);
         }
@@ -834,8 +837,8 @@ extern "C" {
             return;
         }
 
-        // 设置替换帧，让本次读方向（发送给对方）用我们准备的音频
-        switch_core_media_bug_set_read_replace_frame(bug, out_frame);
+        // 设置替换帧，让本次写方向（播放给线路）用我们准备的音频
+        switch_core_media_bug_set_write_replace_frame(bug, out_frame);
     }
     
     int validate_ws_uri(const char* url, char* wsUri) {

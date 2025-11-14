@@ -44,22 +44,15 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             if (tech_pvt->close_requested) {
                 return SWITCH_FALSE;
             }
-            /* 上行：采集本通话音频并推送到 WebSocket */
+            /* 上行：采集线路音频并推送到 WebSocket */
             stream_frame(bug);
-            return SWITCH_TRUE;
-            break;
-            
-        case SWITCH_ABC_TYPE_READ_REPLACE:
-            /* 在 READ_REPLACE 时注入播放音频（下行方向） */
-            if (tech_pvt->stream_play_enabled) {
-                stream_play_frame(bug, tech_pvt);
-            }
             return SWITCH_TRUE;
             break;
 
         case SWITCH_ABC_TYPE_WRITE:
         case SWITCH_ABC_TYPE_WRITE_REPLACE:
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+            /* 下行：将 TTS 音频播放给线路 */
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                               "(%s) capture_callback WRITE/WRITE_REPLACE (type=%d) - stream_play_enabled=%d\n",
                               tech_pvt->sessionId, type, tech_pvt->stream_play_enabled);
             if (tech_pvt->stream_play_enabled) {
@@ -110,16 +103,19 @@ static switch_status_t start_capture(switch_core_session_t *session,
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
         return SWITCH_STATUS_FALSE;
     }
-    // 添加 READ_REPLACE 标志以支持流式播放（播放音频给对方听）
-    flags |= SMBF_READ_REPLACE;
+    // 添加 WRITE_REPLACE 标志以支持流式播放（播放音频给线路）
+    // WRITE 方向：从对端接收的音频 → 播放给线路
+    // 我们替换这个方向的音频，把 TTS 音频播放给线路
+    flags |= SMBF_WRITE_STREAM;
+    flags |= SMBF_WRITE_REPLACE;
     
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
-                      "(%s) adding bug with flags: 0x%x (READ=%d, READ_REPLACE=%d, WRITE=%d)\n", 
+                      "(%s) adding bug with flags: 0x%x (READ=%d, WRITE=%d, WRITE_REPLACE=%d)\n", 
                       ((private_t*)pUserData)->sessionId,
                       flags,
                       (flags & SMBF_READ_STREAM) ? 1 : 0,
-                      (flags & SMBF_READ_REPLACE) ? 1 : 0,
-                      (flags & SMBF_WRITE_STREAM) ? 1 : 0);
+                      (flags & SMBF_WRITE_STREAM) ? 1 : 0,
+                      (flags & SMBF_WRITE_REPLACE) ? 1 : 0);
     if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
         return status;
     }
