@@ -46,8 +46,14 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             }
             /* 上行：采集本通话音频并推送到 WebSocket */
             stream_frame(bug);
-            /* 同一帧周期内，从播放缓冲区取数据，设置写方向替换帧 */
+            return SWITCH_TRUE;
+            break;
+
+        case SWITCH_ABC_TYPE_WRITE_REPLACE:
             if (tech_pvt->stream_play_enabled) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                  "(%s) capture_callback WRITE_REPLACE\n",
+                                  tech_pvt->sessionId);
                 stream_play_frame(bug, tech_pvt);
             }
             return SWITCH_TRUE;
