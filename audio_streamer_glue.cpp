@@ -717,7 +717,7 @@ namespace {
 }
 
 extern "C" {
-    // 流式播放函数：从播放缓冲区读取音频并写入通话
+    // 流式播放函数：从播放缓冲区读取音频并注入到通话中（READ_REPLACE模式）
     switch_bool_t stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
         if (!tech_pvt) {
             return SWITCH_TRUE;
@@ -736,39 +736,51 @@ extern "C" {
             return SWITCH_TRUE;
         }
 
+        // 获取原始音频帧
+        uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+        switch_frame_t frame = {0};
+        frame.data = data;
+        frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+        
+        // 读取原始帧
+        if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+            return SWITCH_TRUE;
+        }
+        
+        if (!frame.datalen) {
+            return SWITCH_TRUE;
+        }
+
         switch_mutex_lock(tech_pvt->play_mutex);
 
         size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
         
         if (inuse > 0) {
-            // 计算一帧大小（20ms）
-            size_t frame_size = tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t) / 50;
-            
-            if (inuse >= frame_size) {
-                uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-                switch_buffer_read(tech_pvt->play_buffer, data, frame_size);
-                
-                // 准备音频帧
-                switch_frame_t frame = {0};
-                frame.data = data;
-                frame.datalen = frame_size;
-                frame.samples = frame_size / (tech_pvt->channels * sizeof(int16_t));
-                frame.rate = tech_pvt->sampling;
-                frame.channels = tech_pvt->channels;
-                
-                // 使用 switch_core_session_write_frame 写入音频
-                switch_status_t status = switch_core_session_write_frame(session, &frame, SWITCH_IO_FLAG_NONE, 0);
-                
-                if (status == SWITCH_STATUS_SUCCESS) {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                        "(%s) Played %zu samples from buffer (remaining: %zu bytes)\n",
-                        tech_pvt->sessionId, frame.samples, switch_buffer_inuse(tech_pvt->play_buffer));
-                } else {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                        "(%s) Failed to write frame, status: %d\n",
-                        tech_pvt->sessionId, status);
-                }
+            // 从播放缓冲区读取音频数据
+            size_t read_size = frame.datalen;
+            if (inuse < read_size) {
+                read_size = inuse;
             }
+            
+            uint8_t play_data[SWITCH_RECOMMENDED_BUFFER_SIZE];
+            switch_buffer_read(tech_pvt->play_buffer, play_data, read_size);
+            
+            // 替换原始帧数据为播放数据
+            memcpy(frame.data, play_data, read_size);
+            
+            // 如果播放数据不足，剩余部分填充静音
+            if (read_size < frame.datalen) {
+                memset((uint8_t*)frame.data + read_size, 0, frame.datalen - read_size);
+            }
+            
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                "(%s) Injected %zu bytes from play buffer (remaining: %zu bytes)\n",
+                tech_pvt->sessionId, read_size, switch_buffer_inuse(tech_pvt->play_buffer));
+        } else {
+            // 播放缓冲区为空，保持原始音频
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                "(%s) Play buffer empty, passing through original audio\n",
+                tech_pvt->sessionId);
         }
 
         switch_mutex_unlock(tech_pvt->play_mutex);

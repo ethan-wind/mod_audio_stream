@@ -43,18 +43,18 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             }
             // 处理下行（FreeSWITCH → 客户端）
             stream_frame(bug);
-            // 同时处理上行播放（客户端 → FreeSWITCH）
-            if (tech_pvt->stream_play_enabled) {
-                stream_play_frame(bug, tech_pvt);
-            }
             return SWITCH_TRUE;
             break;
 
-        case SWITCH_ABC_TYPE_WRITE:
-            // WRITE 事件也处理播放
+        case SWITCH_ABC_TYPE_READ_REPLACE:
+            // 处理上行播放（客户端 → FreeSWITCH）
+            // 使用 READ_REPLACE 模式将音频注入到通话中
             if (tech_pvt->stream_play_enabled) {
                 return stream_play_frame(bug, tech_pvt);
             }
+            break;
+            
+        case SWITCH_ABC_TYPE_WRITE:
             break;
             
         default:
@@ -96,8 +96,8 @@ static switch_status_t start_capture(switch_core_session_t *session,
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
         return SWITCH_STATUS_FALSE;
     }
-    // 添加 WRITE 标志以支持流式播放
-    flags |= SMBF_WRITE_STREAM;
+    // 添加 READ_REPLACE 标志以支持流式播放（将音频注入到通话中）
+    flags |= SMBF_READ_REPLACE;
     
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug with flags: %d\n", flags);
     if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
