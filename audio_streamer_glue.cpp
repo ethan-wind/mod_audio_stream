@@ -748,13 +748,16 @@ extern "C" {
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
                           "(%s) stream_play_frame invoked\n", tech_pvt->sessionId);
 
-        if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
+        if (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
             return SWITCH_TRUE;
         }
 
         if (!frame.datalen) {
             return SWITCH_TRUE;
         }
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                          "(%s) stream_play_frame received frame %u bytes\n",
+                          tech_pvt->sessionId, frame.datalen);
 
         switch_frame_t *out_frame = &tech_pvt->write_frame;
         if (!out_frame->data) {
