@@ -745,6 +745,9 @@ extern "C" {
         frame.data = data;
         frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
 
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                          "(%s) stream_play_frame invoked\n", tech_pvt->sessionId);
+
         if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
             return SWITCH_TRUE;
         }

@@ -48,6 +48,8 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
 
         case SWITCH_ABC_TYPE_WRITE_REPLACE:
             if (tech_pvt->stream_play_enabled) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                  "(%s) capture_callback WRITE_REPLACE\n", tech_pvt->sessionId);
                 return stream_play_frame(bug, tech_pvt);
             }
             break;
