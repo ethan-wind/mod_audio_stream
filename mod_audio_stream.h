@@ -36,11 +36,6 @@ struct private_data {
     switch_buffer_t *play_buffer;      // 播放缓冲区
     switch_mutex_t *play_mutex;        // 播放互斥锁
     int stream_play_enabled:1;         // 启用流式播放
-    switch_frame_t write_frame;        // WRITE_REPLACE 输出帧
-    uint8_t *write_frame_data;         // WRITE_REPLACE 帧缓冲
-    switch_time_t last_play_log;       // 上次写入日志
-    switch_time_t last_empty_log;      // 上次空缓冲日志
-    uint32_t write_replace_logged:1;   // 是否已记录回调初始化
 };
 
 typedef struct private_data private_t;

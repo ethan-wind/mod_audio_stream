@@ -46,18 +46,10 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             return SWITCH_TRUE;
             break;
 
-        case SWITCH_ABC_TYPE_WRITE_REPLACE:
-            // 处理流式播放（客户端 → 对方）
-            // 使用 WRITE_REPLACE 模式将音频注入到通话中，让对方听到
+        case SWITCH_ABC_TYPE_WRITE:
             if (tech_pvt->stream_play_enabled) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                                  "(%s) SWITCH_ABC_TYPE_WRITE_REPLACE firing\n",
-                                  tech_pvt->sessionId);
                 return stream_play_frame(bug, tech_pvt);
             }
-            break;
-            
-        case SWITCH_ABC_TYPE_WRITE:
             break;
             
         default:
@@ -99,8 +91,7 @@ static switch_status_t start_capture(switch_core_session_t *session,
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing mod_audio_stream session.\n");
         return SWITCH_STATUS_FALSE;
     }
-    // 添加 WRITE_REPLACE 标志以支持流式播放（将音频注入到通话中，让对方听到）
-    flags |= SMBF_WRITE_REPLACE;
+    // 添加 WRITE 标志以支持流式播放（将音频注入到通话中，让对方听到）
     flags |= SMBF_WRITE_STREAM;
     
     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug with flags: %d\n", flags);
