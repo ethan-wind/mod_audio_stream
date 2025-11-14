@@ -666,6 +666,9 @@ namespace {
         tech_pvt->write_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
         tech_pvt->write_frame.rate = desiredSampling;
         tech_pvt->write_frame.channels = channels;
+        tech_pvt->last_play_log = 0;
+        tech_pvt->last_empty_log = 0;
+        tech_pvt->write_replace_logged = 0;
         
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
             "(%s) Stream play enabled with buffer size: %zu bytes (%.2f seconds)\n",
@@ -756,10 +759,23 @@ extern "C" {
             return SWITCH_TRUE;
         }
 
+        frame.rate = tech_pvt->sampling;
+        frame.channels = tech_pvt->channels;
+        frame.samples = frame.datalen / (tech_pvt->channels * sizeof(int16_t));
+
         switch_frame_t *out_frame = &tech_pvt->write_frame;
         if (!out_frame->data) {
             return SWITCH_TRUE;
         }
+        
+        if (!tech_pvt->write_replace_logged) {
+            tech_pvt->write_replace_logged = 1;
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) stream_play_frame is now active (frame %u bytes)\n",
+                              tech_pvt->sessionId, frame.datalen);
+        }
+
+        switch_time_t now = switch_micro_time_now();
 
         size_t copy_len = frame.datalen;
         if (copy_len > out_frame->buflen) {
@@ -797,16 +813,26 @@ extern "C" {
             out_frame->rate = tech_pvt->sampling;
             out_frame->channels = tech_pvt->channels;
 
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) Injected %zu bytes from play buffer (remaining: %zu bytes)\n",
-                              tech_pvt->sessionId, read_size, switch_buffer_inuse(tech_pvt->play_buffer));
+            if (!tech_pvt->last_play_log || (now - tech_pvt->last_play_log) > 250000) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) Injected %zu/%zu bytes from play buffer (buffer: %.2f ms left)\n",
+                                  tech_pvt->sessionId,
+                                  read_size,
+                                  target_bytes,
+                                  (double)switch_buffer_inuse(tech_pvt->play_buffer) /
+                                  (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0);
+                tech_pvt->last_play_log = now;
+            }
         }
         switch_mutex_unlock(tech_pvt->play_mutex);
 
         if (!injected) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) Play buffer empty, passing through original audio\n",
-                              tech_pvt->sessionId);
+            if (!tech_pvt->last_empty_log || (now - tech_pvt->last_empty_log) > 1000000) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) Play buffer empty, passing through caller audio\n",
+                                  tech_pvt->sessionId);
+                tech_pvt->last_empty_log = now;
+            }
         }
 
         switch_core_media_bug_set_write_replace_frame(bug, out_frame);
