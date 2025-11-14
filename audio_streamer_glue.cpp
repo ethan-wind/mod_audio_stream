@@ -654,6 +654,18 @@ namespace {
         
         // 默认启用流式播放
         tech_pvt->stream_play_enabled = 1;
+
+        tech_pvt->write_frame_data = (uint8_t*)switch_core_session_alloc(session, SWITCH_RECOMMENDED_BUFFER_SIZE);
+        if (!tech_pvt->write_frame_data) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "%s: Failed to allocate write frame buffer.\n", tech_pvt->sessionId);
+            return SWITCH_STATUS_FALSE;
+        }
+        memset(&tech_pvt->write_frame, 0, sizeof(tech_pvt->write_frame));
+        tech_pvt->write_frame.data = tech_pvt->write_frame_data;
+        tech_pvt->write_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
+        tech_pvt->write_frame.rate = desiredSampling;
+        tech_pvt->write_frame.channels = channels;
         
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
             "(%s) Stream play enabled with buffer size: %zu bytes (%.2f seconds)\n",
@@ -717,7 +729,7 @@ namespace {
 }
 
 extern "C" {
-    // 流式播放函数：从播放缓冲区读取音频并注入到通话中（WRITE模式）
+    // 流式播放函数：从播放缓冲区读取音频并注入到通话中（WRITE_REPLACE模式）
     switch_bool_t stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
         if (!tech_pvt || !tech_pvt->play_buffer || !tech_pvt->stream_play_enabled) {
             return SWITCH_TRUE;
@@ -728,54 +740,77 @@ extern "C" {
             return SWITCH_TRUE;
         }
 
-        uint8_t original[SWITCH_RECOMMENDED_BUFFER_SIZE];
+        uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
         switch_frame_t frame = {0};
-        frame.data = original;
+        frame.data = data;
         frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
 
-        // 读取当前将要发送的音频帧，用于作为默认回退
-        if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS || !frame.datalen) {
+        if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
             return SWITCH_TRUE;
         }
 
-        std::vector<uint8_t> playback(frame.datalen);
+        if (!frame.datalen) {
+            return SWITCH_TRUE;
+        }
+
+        switch_frame_t *out_frame = &tech_pvt->write_frame;
+        if (!out_frame->data) {
+            return SWITCH_TRUE;
+        }
+
+        size_t copy_len = frame.datalen;
+        if (copy_len > out_frame->buflen) {
+            copy_len = out_frame->buflen;
+        }
+        memcpy(out_frame->data, frame.data, copy_len);
+        out_frame->datalen = copy_len;
+        out_frame->samples = frame.samples;
+        out_frame->rate = frame.rate;
+        out_frame->channels = frame.channels;
+        out_frame->timestamp = frame.timestamp;
+
         bool injected = false;
 
         switch_mutex_lock(tech_pvt->play_mutex);
         size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
 
-        if (inuse >= frame.datalen) {
-            switch_buffer_read(tech_pvt->play_buffer, playback.data(), frame.datalen);
+        if (inuse > 0) {
+            size_t target_bytes = copy_len;
+            size_t read_size = target_bytes;
+
+            if (inuse < read_size) {
+                read_size = inuse;
+            }
+
+            switch_buffer_read(tech_pvt->play_buffer, out_frame->data, read_size);
             injected = true;
-        } else if (inuse > 0) {
-            switch_buffer_read(tech_pvt->play_buffer, playback.data(), inuse);
-            memset(playback.data() + inuse, 0, frame.datalen - inuse);
-            injected = true;
+
+            if (read_size < target_bytes) {
+                memset((uint8_t*)out_frame->data + read_size, 0, target_bytes - read_size);
+            }
+
+            out_frame->datalen = target_bytes;
+            out_frame->samples = target_bytes / (tech_pvt->channels * sizeof(int16_t));
+            out_frame->rate = tech_pvt->sampling;
+            out_frame->channels = tech_pvt->channels;
+
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                              "(%s) stream_play_frame injected %zu/%zu bytes (buffer left: %.2f ms)\n",
+                              tech_pvt->sessionId,
+                              read_size,
+                              target_bytes,
+                              (double)switch_buffer_inuse(tech_pvt->play_buffer) /
+                              (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0);
         }
         switch_mutex_unlock(tech_pvt->play_mutex);
 
-        if (injected) {
-            frame.data = playback.data();
-            frame.datalen = playback.size();
-            frame.samples = frame.datalen / (tech_pvt->channels * sizeof(int16_t));
-            frame.rate = tech_pvt->sampling;
-            frame.channels = tech_pvt->channels;
-
-            switch_core_media_bug_write_frame(bug, &frame);
+        if (!injected) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame wrote %zu bytes (buffer left: %.2f ms)\n",
-                              tech_pvt->sessionId,
-                              frame.datalen,
-                              (double)switch_buffer_inuse(tech_pvt->play_buffer) /
-                              (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0);
-        } else {
-            // 缓冲区为空，继续发送原始音频
-            switch_core_media_bug_write_frame(bug, &frame);
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame fallback to original audio\n",
+                              "(%s) stream_play_frame buffer empty, passthrough original audio\n",
                               tech_pvt->sessionId);
         }
 
+        switch_core_media_bug_set_write_replace_frame(bug, out_frame);
         return SWITCH_TRUE;
     }
     
