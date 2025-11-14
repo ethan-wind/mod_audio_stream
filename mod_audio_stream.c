@@ -46,6 +46,11 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             }
             /* 上行：采集本通话音频并推送到 WebSocket */
             stream_frame(bug);
+            
+            /* 如果启用了流式播放，在 READ 时也尝试注入音频 */
+            if (tech_pvt->stream_play_enabled) {
+                stream_play_frame(bug, tech_pvt);
+            }
             return SWITCH_TRUE;
             break;
 
