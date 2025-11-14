@@ -720,15 +720,7 @@ extern "C" {
     // 流式播放函数：从播放缓冲区读取音频并注入到通话中（WRITE_REPLACE模式）
     // 这会替换发送给对方的音频，让对方听到流式播放的内容
     switch_bool_t stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
-        if (!tech_pvt) {
-            return SWITCH_TRUE;
-        }
-        
-        if (!tech_pvt->play_buffer) {
-            return SWITCH_TRUE;
-        }
-        
-        if (!tech_pvt->stream_play_enabled) {
+        if (!tech_pvt || !tech_pvt->play_buffer || !tech_pvt->stream_play_enabled) {
             return SWITCH_TRUE;
         }
 
@@ -737,54 +729,58 @@ extern "C" {
             return SWITCH_TRUE;
         }
 
-        // 获取要发送给对方的原始音频帧
         uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
         switch_frame_t frame = {0};
         frame.data = data;
         frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-        
-        // 读取原始帧（WRITE方向：本地→对方）
+
+        /* Always read the original frame so we can fall back to passthrough audio
+         * when the playback buffer runs dry. */
         if (switch_core_media_bug_read(bug, &frame, SWITCH_FALSE) != SWITCH_STATUS_SUCCESS) {
             return SWITCH_TRUE;
         }
-        
+
         if (!frame.datalen) {
             return SWITCH_TRUE;
         }
 
-        switch_mutex_lock(tech_pvt->play_mutex);
+        bool injected = false;
 
+        switch_mutex_lock(tech_pvt->play_mutex);
         size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
-        
+
         if (inuse > 0) {
-            // 从播放缓冲区读取音频数据
-            size_t read_size = frame.datalen;
+            size_t target_bytes = frame.datalen;
+            size_t read_size = target_bytes;
+
             if (inuse < read_size) {
                 read_size = inuse;
             }
-            
-            uint8_t play_data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-            switch_buffer_read(tech_pvt->play_buffer, play_data, read_size);
-            
-            // 替换原始帧数据为播放数据（对方会听到这个）
-            memcpy(frame.data, play_data, read_size);
-            
-            // 如果播放数据不足，剩余部分填充静音
-            if (read_size < frame.datalen) {
-                memset((uint8_t*)frame.data + read_size, 0, frame.datalen - read_size);
+
+            switch_buffer_read(tech_pvt->play_buffer, frame.data, read_size);
+            injected = true;
+
+            if (read_size < target_bytes) {
+                memset((uint8_t*)frame.data + read_size, 0, target_bytes - read_size);
             }
-            
+
+            frame.samples = frame.datalen / (tech_pvt->channels * sizeof(int16_t));
+            frame.rate = tech_pvt->sampling;
+            frame.channels = tech_pvt->channels;
+
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                "(%s) Injected %zu bytes from play buffer (remaining: %zu bytes)\n",
-                tech_pvt->sessionId, read_size, switch_buffer_inuse(tech_pvt->play_buffer));
-        } else {
-            // 播放缓冲区为空，保持原始音频（对方听到本地麦克风）
+                              "(%s) Injected %zu bytes from play buffer (remaining: %zu bytes)\n",
+                              tech_pvt->sessionId, read_size, switch_buffer_inuse(tech_pvt->play_buffer));
+        }
+        switch_mutex_unlock(tech_pvt->play_mutex);
+
+        if (!injected) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                "(%s) Play buffer empty, passing through original audio\n",
-                tech_pvt->sessionId);
+                              "(%s) Play buffer empty, passing through original audio\n",
+                              tech_pvt->sessionId);
         }
 
-        switch_mutex_unlock(tech_pvt->play_mutex);
+        switch_core_media_bug_write_replace(bug, &frame);
         return SWITCH_TRUE;
     }
     
@@ -1130,4 +1126,3 @@ extern "C" {
         return SWITCH_STATUS_FALSE;
     }
 }
-
