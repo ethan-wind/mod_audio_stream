@@ -740,11 +740,14 @@ extern "C" {
             return;
         }
 
-        // 从 media bug 获取写方向的替换帧
+        // 从 media bug 获取写方向的替换帧，如果为空则退回到本地预分配的 write_frame
         switch_frame_t *out_frame = switch_core_media_bug_get_write_replace_frame(bug);
-        if (!out_frame || !out_frame->data || !out_frame->buflen) {
+        if (!out_frame) {
+            out_frame = &tech_pvt->write_frame;
+        }
+        if (!out_frame->data || !out_frame->buflen) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame: no write_replace_frame available\n",
+                              "(%s) stream_play_frame: no valid write_replace_frame buffer\n",
                               tech_pvt->sessionId);
             return;
         }
