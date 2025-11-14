@@ -729,7 +729,7 @@ namespace {
 }
 
 extern "C" {
-    // 流式播放函数：从播放缓冲区读取音频并注入到通话中（WRITE_REPLACE模式）
+    // 流式播放函数：从播放缓冲区读取音频并注入到通话中（WRITE_REPLACE）
     void stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
         if (!tech_pvt || !tech_pvt->play_buffer || !tech_pvt->stream_play_enabled) {
             return;
@@ -740,40 +740,23 @@ extern "C" {
             return;
         }
 
-        uint8_t data[SWITCH_RECOMMENDED_BUFFER_SIZE];
-        switch_frame_t frame = {0};
-        frame.data = data;
-        frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                          "(%s) stream_play_frame invoked\n", tech_pvt->sessionId);
-
-        if (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) != SWITCH_STATUS_SUCCESS) {
+        // 从 media bug 获取写方向的替换帧
+        switch_frame_t *out_frame = switch_core_media_bug_get_write_replace_frame(bug);
+        if (!out_frame || !out_frame->data || !out_frame->buflen) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                              "(%s) stream_play_frame: no write_replace_frame available\n",
+                              tech_pvt->sessionId);
             return;
         }
 
-        if (!frame.datalen) {
-            return;
+        // 以 20ms 为目标帧长，如果已有 datalen 就用现有大小
+        size_t target_bytes = out_frame->datalen;
+        if (!target_bytes) {
+            target_bytes = FRAME_SIZE_8000 * tech_pvt->sampling / 8000 * tech_pvt->channels;
         }
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                          "(%s) stream_play_frame received frame %u bytes\n",
-                          tech_pvt->sessionId, frame.datalen);
-
-        switch_frame_t *out_frame = &tech_pvt->write_frame;
-        if (!out_frame->data) {
-            return;
+        if (target_bytes > out_frame->buflen) {
+            target_bytes = out_frame->buflen;
         }
-
-        size_t copy_len = frame.datalen;
-        if (copy_len > out_frame->buflen) {
-            copy_len = out_frame->buflen;
-        }
-        memcpy(out_frame->data, frame.data, copy_len);
-        out_frame->datalen = copy_len;
-        out_frame->samples = frame.samples;
-        out_frame->rate = frame.rate;
-        out_frame->channels = frame.channels;
-        out_frame->timestamp = frame.timestamp;
 
         bool injected = false;
 
@@ -781,9 +764,7 @@ extern "C" {
         size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
 
         if (inuse > 0) {
-            size_t target_bytes = copy_len;
             size_t read_size = target_bytes;
-
             if (inuse < read_size) {
                 read_size = inuse;
             }
@@ -800,7 +781,7 @@ extern "C" {
             out_frame->rate = tech_pvt->sampling;
             out_frame->channels = tech_pvt->channels;
 
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
                               "(%s) stream_play_frame injected %zu/%zu bytes (buffer left: %.2f ms)\n",
                               tech_pvt->sessionId,
                               read_size,
@@ -811,11 +792,14 @@ extern "C" {
         switch_mutex_unlock(tech_pvt->play_mutex);
 
         if (!injected) {
+            // 不调用 set_write_replace_frame，保持原始音频
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame buffer empty, passthrough original audio\n",
+                              "(%s) stream_play_frame: buffer empty, passthrough\n",
                               tech_pvt->sessionId);
+            return;
         }
 
+        // 设置替换帧，让本次写方向用我们准备的音频
         switch_core_media_bug_set_write_replace_frame(bug, out_frame);
     }
     

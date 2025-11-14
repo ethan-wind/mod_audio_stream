@@ -26,6 +26,9 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
 
     switch (type) {
         case SWITCH_ABC_TYPE_INIT:
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                              "(%s) capture_callback INIT - stream_play_enabled=%d\n",
+                              tech_pvt->sessionId, tech_pvt->stream_play_enabled);
             break;
 
         case SWITCH_ABC_TYPE_CLOSE:
@@ -41,19 +44,13 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             if (tech_pvt->close_requested) {
                 return SWITCH_FALSE;
             }
-            // 处理下行（FreeSWITCH → 客户端）
+            /* 上行：采集本通话音频并推送到 WebSocket */
             stream_frame(bug);
-            return SWITCH_TRUE;
-            break;
-
-        case SWITCH_ABC_TYPE_WRITE_REPLACE:
+            /* 同一帧周期内，从播放缓冲区取数据，设置写方向替换帧 */
             if (tech_pvt->stream_play_enabled) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                                  "(%s) capture_callback type=%d stream_play\n",
-                                  tech_pvt->sessionId, type);
                 stream_play_frame(bug, tech_pvt);
-                return SWITCH_TRUE;
             }
+            return SWITCH_TRUE;
             break;
             
         default:
@@ -102,7 +99,13 @@ static switch_status_t start_capture(switch_core_session_t *session,
     flags |= SMBF_WRITE_STREAM;
     flags |= SMBF_WRITE_REPLACE;
     
-    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "adding bug with flags: %d\n", flags);
+    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
+                      "(%s) adding bug with flags: 0x%x (READ=%d, WRITE=%d, WRITE_REPLACE=%d)\n", 
+                      ((private_t*)pUserData)->sessionId,
+                      flags,
+                      (flags & SMBF_READ_STREAM) ? 1 : 0,
+                      (flags & SMBF_WRITE_STREAM) ? 1 : 0,
+                      (flags & SMBF_WRITE_REPLACE) ? 1 : 0);
     if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
         return status;
     }
