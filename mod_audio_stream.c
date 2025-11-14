@@ -50,6 +50,9 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             // 处理流式播放（客户端 → 对方）
             // 使用 WRITE_REPLACE 模式将音频注入到通话中，让对方听到
             if (tech_pvt->stream_play_enabled) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                  "(%s) SWITCH_ABC_TYPE_WRITE_REPLACE firing\n",
+                                  tech_pvt->sessionId);
                 return stream_play_frame(bug, tech_pvt);
             }
             break;
