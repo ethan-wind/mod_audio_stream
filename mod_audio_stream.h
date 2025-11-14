@@ -38,6 +38,10 @@ struct private_data {
     int stream_play_enabled:1;         // 启用流式播放
     switch_frame_t write_frame;        // WRITE_REPLACE 输出帧
     uint8_t *write_frame_data;         // WRITE_REPLACE 帧缓冲
+    
+    // 播放线程支持
+    switch_thread_t *play_thread;      // 播放线程
+    int play_thread_running:1;         // 播放线程运行标志
 };
 
 typedef struct private_data private_t;

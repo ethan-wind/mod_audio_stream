@@ -656,6 +656,22 @@ namespace {
         
         // 默认启用流式播放
         tech_pvt->stream_play_enabled = 1;
+        
+        // 启动播放线程
+        tech_pvt->play_thread_running = 1;
+        switch_threadattr_t *thd_attr = nullptr;
+        switch_threadattr_create(&thd_attr, pool);
+        switch_threadattr_detach_set(thd_attr, 1);
+        switch_threadattr_stacksize_set(thd_attr, SWITCH_THREAD_STACKSIZE);
+        
+        if (switch_thread_create(&tech_pvt->play_thread, thd_attr, play_thread_run, tech_pvt, pool) != SWITCH_STATUS_SUCCESS) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "%s: Error creating play thread.\n", tech_pvt->sessionId);
+            tech_pvt->play_thread_running = 0;
+        } else {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) Play thread started successfully\n", tech_pvt->sessionId);
+        }
 
         tech_pvt->write_frame_data = (uint8_t*)switch_core_session_alloc(session, SWITCH_RECOMMENDED_BUFFER_SIZE);
         if (!tech_pvt->write_frame_data) {
@@ -694,6 +710,19 @@ namespace {
 
     void destroy_tech_pvt(private_t* tech_pvt) {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, "%s destroy_tech_pvt\n", tech_pvt->sessionId);
+        
+        // 停止播放线程
+        if (tech_pvt->play_thread_running) {
+            tech_pvt->play_thread_running = 0;
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO, 
+                              "%s stopping play thread\n", tech_pvt->sessionId);
+            // 等待线程结束（最多 1 秒）
+            if (tech_pvt->play_thread) {
+                switch_status_t st;
+                switch_thread_join(&st, tech_pvt->play_thread);
+            }
+        }
+        
         if (tech_pvt->resampler) {
             speex_resampler_destroy(tech_pvt->resampler);
             tech_pvt->resampler = nullptr;
@@ -731,6 +760,89 @@ namespace {
 }
 
 extern "C" {
+    // 播放线程函数：主动从缓冲区读取音频并播放
+    static void* SWITCH_THREAD_FUNC play_thread_run(switch_thread_t *thread, void *obj) {
+        private_t *tech_pvt = (private_t *)obj;
+        
+        switch_core_session_t *session = switch_core_session_locate(tech_pvt->sessionId);
+        if (!session) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_ERROR,
+                              "(%s) play_thread: cannot locate session\n",
+                              tech_pvt->sessionId);
+            return nullptr;
+        }
+        
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                          "(%s) play_thread: started\n",
+                          tech_pvt->sessionId);
+        
+        // 计算每帧大小（20ms）
+        size_t frame_size = FRAME_SIZE_8000 * tech_pvt->sampling / 8000 * tech_pvt->channels;
+        uint8_t *frame_data = (uint8_t *)malloc(frame_size);
+        
+        if (!frame_data) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "(%s) play_thread: failed to allocate frame buffer\n",
+                              tech_pvt->sessionId);
+            switch_core_session_rwunlock(session);
+            return nullptr;
+        }
+        
+        // 20ms 间隔
+        uint32_t interval_ms = 20;
+        
+        while (tech_pvt->play_thread_running) {
+            switch_mutex_lock(tech_pvt->play_mutex);
+            size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+            
+            if (inuse >= frame_size) {
+                // 从缓冲区读取一帧音频
+                size_t read_size = switch_buffer_read(tech_pvt->play_buffer, frame_data, frame_size);
+                
+                if (read_size > 0) {
+                    // 使用 switch_ivr_play_file 的底层 API 播放音频
+                    // 这里我们直接写入到 session 的音频队列
+                    switch_frame_t frame = {0};
+                    frame.data = frame_data;
+                    frame.datalen = read_size;
+                    frame.samples = read_size / (tech_pvt->channels * sizeof(int16_t));
+                    frame.rate = tech_pvt->sampling;
+                    frame.channels = tech_pvt->channels;
+                    
+                    // 使用 switch_core_session_write_frame 写入音频
+                    switch_status_t status = switch_core_session_write_frame(session, &frame, SWITCH_IO_FLAG_NONE, 0);
+                    
+                    if (status == SWITCH_STATUS_SUCCESS) {
+                        size_t remaining = switch_buffer_inuse(tech_pvt->play_buffer);
+                        double buffer_ms = (double)remaining / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+                        
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                          "(%s) play_thread: played %zu bytes (buffer left: %.2f ms)\n",
+                                          tech_pvt->sessionId, read_size, buffer_ms);
+                    } else {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                          "(%s) play_thread: write_frame failed with status %d\n",
+                                          tech_pvt->sessionId, status);
+                    }
+                }
+            }
+            
+            switch_mutex_unlock(tech_pvt->play_mutex);
+            
+            // 休眠 20ms
+            switch_yield(interval_ms * 1000);
+        }
+        
+        free(frame_data);
+        
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                          "(%s) play_thread: stopped\n",
+                          tech_pvt->sessionId);
+        
+        switch_core_session_rwunlock(session);
+        return nullptr;
+    }
+    
     // 流式播放函数：从播放缓冲区读取音频并注入到通话中（WRITE_REPLACE）
     void stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
         switch_core_session_t *session = switch_core_media_bug_get_session(bug);
