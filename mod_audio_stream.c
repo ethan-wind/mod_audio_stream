@@ -107,16 +107,8 @@ static switch_status_t start_capture(switch_core_session_t *session,
     // 添加 WRITE_REPLACE 标志以支持流式播放（播放音频给线路）
     // WRITE 方向：从对端接收的音频 → 播放给线路
     // 我们替换这个方向的音频，把 TTS 音频播放给线路
-    flags |= SMBF_WRITE_STREAM;
     flags |= SMBF_WRITE_REPLACE;
     
-    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO, 
-                      "(%s) adding bug with flags: 0x%x (READ=%d, WRITE=%d, WRITE_REPLACE=%d)\n", 
-                      ((private_t*)pUserData)->sessionId,
-                      flags,
-                      (flags & SMBF_READ_STREAM) ? 1 : 0,
-                      (flags & SMBF_WRITE_STREAM) ? 1 : 0,
-                      (flags & SMBF_WRITE_REPLACE) ? 1 : 0);
     if ((status = switch_core_media_bug_add(session, MY_BUG_NAME, NULL, capture_callback, pUserData, 0, flags, &bug)) != SWITCH_STATUS_SUCCESS) {
         return status;
     }

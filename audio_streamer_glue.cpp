@@ -437,12 +437,6 @@ public:
                                         }
                                     }
                                     
-                                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                                        "(%s) 重采样: %d Hz → %d Hz (%zu → %u samples), 前3: %d, %d, %d\n",
-                                        m_sessionId.c_str(), sampleRate, target_rate, input_samples, out_len,
-                                        out_len > 0 ? playbackSamples[0] : 0,
-                                        out_len > 1 ? playbackSamples[1] : 0,
-                                        out_len > 2 ? playbackSamples[2] : 0);
                                 } else {
                                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                         "(%s) 重采样器初始化失败: %s\n",
@@ -480,12 +474,6 @@ public:
                                 size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                                 
-                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                    "(%s) 入队播放: %zu samples (%zu bytes) @ %d Hz | 缓冲区: %.2f ms | 前3: %d, %d, %d\n",
-                                    m_sessionId.c_str(), playbackSamples.size(), data_size, target_rate, buffer_ms,
-                                    playbackSamples.size() > 0 ? playbackSamples[0] : 0,
-                                    playbackSamples.size() > 1 ? playbackSamples[1] : 0,
-                                    playbackSamples.size() > 2 ? playbackSamples[2] : 0);
                             } else {
                                 size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
@@ -757,12 +745,6 @@ namespace {
         tech_pvt->write_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
         tech_pvt->write_frame.rate = sampling;  // 使用通话采样率
         tech_pvt->write_frame.channels = channels;
-        
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-            "(%s) Stream play enabled with buffer size: %zu bytes (%.2f seconds) @ %u Hz\n",
-            tech_pvt->sessionId, play_buflen, 
-            (double)play_buflen / (sampling * channels * sizeof(int16_t)),
-            sampling);
 
 
         // 注意：这里的 resampler 是用于上行音频（READ 方向）的重采样
@@ -781,8 +763,6 @@ namespace {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
                 "(%s) 上行无需重采样: %u Hz\n", tech_pvt->sessionId, sampling);
         }
-
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_data_init\n", tech_pvt->sessionId);
 
         return SWITCH_STATUS_SUCCESS;
     }
@@ -857,20 +837,6 @@ extern "C" {
         if (!session) {
             return;
         }
-        
-        // 计算回调频率
-        static uint64_t last_call_time = 0;
-        static int call_count = 0;
-        uint64_t now = switch_time_now();
-        if (last_call_time > 0 && call_count < 10) {
-            uint64_t interval_us = now - last_call_time;
-            double interval_ms = interval_us / 1000.0;
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                "(%s) stream_play_frame 回调间隔: %.2f ms\n",
-                tech_pvt->sessionId, interval_ms);
-            call_count++;
-        }
-        last_call_time = now;
 
         // 从 media bug 获取写方向的替换帧（播放给线路的音频）
         switch_frame_t *out_frame = switch_core_media_bug_get_write_replace_frame(bug);
@@ -887,7 +853,6 @@ extern "C" {
         // 计算 20ms 帧长度 (16-bit PCM 格式)
         // 公式: samples_per_20ms = sampling_rate * 0.02
         //       bytes = samples * channels * sizeof(int16_t)
-        size_t original_datalen = out_frame->datalen;
         size_t target_bytes = out_frame->datalen;
         if (!target_bytes) {
             // 标准 20ms 帧: 8000Hz=320字节, 16000Hz=640字节
@@ -895,14 +860,6 @@ extern "C" {
         }
         if (target_bytes > out_frame->buflen) {
             target_bytes = out_frame->buflen;
-        }
-        
-        // 添加日志：检查帧长度
-        static int log_count = 0;
-        if (log_count++ < 5) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                "(%s) 帧长度: original_datalen=%zu, target_bytes=%zu, buflen=%zu, sampling=%d Hz\n",
-                tech_pvt->sessionId, original_datalen, target_bytes, out_frame->buflen, tech_pvt->sampling);
         }
 
         bool injected = false;
