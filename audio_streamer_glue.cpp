@@ -251,8 +251,8 @@ public:
                     if(processMessage(psession, msg) != SWITCH_TRUE) {
                         m_notify(psession, EVENT_JSON, msg.c_str());
                     }
-                    if(!m_suppress_log)
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG, "response: %s\n", msg.c_str());
+                    // if(!m_suppress_log)
+                        // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG, "response: %s\n", msg.c_str());
                     break;
             }
             switch_core_session_rwunlock(psession);
@@ -272,13 +272,6 @@ public:
                 cJSON* jsonFile = nullptr;
                 cJSON* jsonAudio = cJSON_DetachItemFromObject(jsonData, "audioData");
                 const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
-                
-                // 添加日志：检查接收到的数据
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                  "(%s) processMessage - audioDataType: %s, audioData: %s\n",
-                                  m_sessionId.c_str(), 
-                                  jsAudioDataType ? jsAudioDataType : "NULL",
-                                  jsonAudio && jsonAudio->valuestring ? "present" : "NULL");
                 
                 std::string fileType;
                 int sampleRate = 0;
@@ -304,9 +297,9 @@ public:
                     auto it = sampleRateMap.find(sampleRate);
                     fileType = (it != sampleRateMap.end()) ? it->second : "";
                     
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) 接收音频: sampleRate=%d Hz, fileType=%s\n",
-                                      m_sessionId.c_str(), sampleRate, fileType.c_str());
+                    // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                    //                  "(%s) 接收音频: sampleRate=%d Hz, fileType=%s\n",
+                    //                  m_sessionId.c_str(), sampleRate, fileType.c_str());
                 } else if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "wav")) {
                     fileType = ".wav";
                 } else if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "mp3")) {
@@ -318,12 +311,6 @@ public:
                                       "(%s) processMessage - unsupported or missing audio type: %s\n",
                                       m_sessionId.c_str(), jsAudioDataType ? jsAudioDataType : "NULL");
                 }
-                
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                  "(%s) processMessage - fileType determined: %s, jsonAudio: %s\n",
-                                  m_sessionId.c_str(), 
-                                  fileType.empty() ? "EMPTY" : fileType.c_str(),
-                                  jsonAudio && jsonAudio->valuestring ? "valid" : "NULL");
 
                 if(jsonAudio && jsonAudio->valuestring != nullptr && !fileType.empty()) {
                     char finalFilePath[256];
@@ -339,9 +326,6 @@ public:
                     
                     // 只处理raw格式的音频，转换为 FreeSWitch 可播放的格式
                     if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw") && sampleRate > 0) {
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                          "(%s) Processing WebSocket audio: %d Hz, %zu bytes (32-bit Float, LE, Mono)\n",
-                                          m_sessionId.c_str(), sampleRate, rawAudio.size());
                         
                         // ========== 步骤 1: 32-bit Float → 16-bit Linear PCM ==========
                         // 输入格式 (WebSocket 原始流):
@@ -381,16 +365,6 @@ public:
                             pcm16bit[i] = static_cast<int16_t>(sample * 32767.0f);
                         }
                         
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                                          "(%s) Float32→PCM: %zu samples, 前3: %.6f→%d, %.6f→%d, %.6f→%d\n",
-                                          m_sessionId.c_str(), input_samples,
-                                          input_samples > 0 ? float_data[0] : 0.0f,
-                                          input_samples > 0 ? pcm16bit[0] : 0,
-                                          input_samples > 1 ? float_data[1] : 0.0f,
-                                          input_samples > 1 ? pcm16bit[1] : 0,
-                                          input_samples > 2 ? float_data[2] : 0.0f,
-                                          input_samples > 2 ? pcm16bit[2] : 0);
-                        
                         // 获取 tech_pvt 用于流式播放
                         auto *bug = get_media_bug(session);
                         private_t *tech_pvt = nullptr;
@@ -416,13 +390,6 @@ public:
                         if (tech_pvt && tech_pvt->stream_play_enabled) {
                             int target_rate = tech_pvt->sampling;      // 通话采样率 (8000/16000 Hz)
                             int target_channels = tech_pvt->channels;  // 通话声道数 (通常为1)
-                            
-                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                "(%s) ========== 重采样 ==========\n", m_sessionId.c_str());
-                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                "(%s) 输入: %d Hz, %zu samples | 目标: %d Hz | 需要重采样: %s\n",
-                                m_sessionId.c_str(), sampleRate, input_samples, target_rate,
-                                sampleRate != target_rate ? "是" : "否");
                             
                             std::vector<int16_t> playbackSamples;
                             
@@ -553,9 +520,9 @@ public:
                                 outputSamples.resize(out_len);
                                 speex_resampler_destroy(resampler);
                                 
-                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                                  "(%s) processMessage - resampled from %d to 8000 Hz: %zu -> %zu samples\n",
-                                                  m_sessionId.c_str(), sampleRate, input_samples, out_len);
+                                // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                //                  "(%s) processMessage - resampled from %d to 8000 Hz: %zu -> %zu samples\n",
+                                //                  m_sessionId.c_str(), sampleRate, input_samples, out_len);
                             } else {
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                                   "(%s) processMessage - failed to initialize resampler: %s\n",
@@ -581,9 +548,9 @@ public:
                             alawData[i] = linear_to_alaw(outputSamples[i]);
                         }
                         
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                          "(%s) processMessage - converted %zu samples to A-law\n",
-                                          m_sessionId.c_str(), outputSamples.size());
+                        // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                        //                  "(%s) processMessage - converted %zu samples to A-law\n",
+                        //                  m_sessionId.c_str(), outputSamples.size());
                         
                         // 写入 G.711 A-law WAV 文件头和数据（小端序）
                         std::ofstream wavFile(finalFilePath, std::ofstream::binary);
@@ -623,9 +590,9 @@ public:
                             jsonFile = cJSON_CreateString(finalFilePath);
                             cJSON_AddItemToObject(jsonData, "file", jsonFile);
                             
-                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                              "(%s) processMessage - G.711 A-law WAV file created: %s (8000 Hz, %u bytes, %zu samples)\n",
-                                              m_sessionId.c_str(), finalFilePath, dataSize, outputSamples.size());
+                            // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                            //                  "(%s) processMessage - G.711 A-law WAV file created: %s (8000 Hz, %u bytes, %zu samples)\n",
+                            //                  m_sessionId.c_str(), finalFilePath, dataSize, outputSamples.size());
                         } else {
                             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                                               "(%s) processMessage - failed to create WAV file: %s\n",
@@ -647,9 +614,9 @@ public:
                 if(jsonFile) {
                     char *jsonString = cJSON_PrintUnformatted(jsonData);
                     
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) processMessage - firing EVENT_PLAY: %s\n",
-                                      m_sessionId.c_str(), jsonString);
+                    // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                    //                   "(%s) processMessage - firing EVENT_PLAY: %s\n",
+                    //                  m_sessionId.c_str(), jsonString);
                     
                     m_notify(session, EVENT_PLAY, jsonString);
                     message.assign(jsonString);
@@ -964,21 +931,18 @@ extern "C" {
             out_frame->rate = tech_pvt->sampling;        // 通话采样率
             out_frame->channels = tech_pvt->channels;    // 通话声道数
 
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) 注入音频: %u samples @ %d Hz | 缓冲区剩余: %.2f ms\n",
-                              tech_pvt->sessionId,
-                              out_frame->samples,
-                              out_frame->rate,
-                              (double)switch_buffer_inuse(tech_pvt->play_buffer) /
-                              (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0);
+            // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+            //                   "(%s) 注入音频: %u samples @ %d Hz | 缓冲区剩余: %.2f ms\n",
+            //                   tech_pvt->sessionId,
+            //                  out_frame->samples,
+            //                  out_frame->rate,
+            //                  (double)switch_buffer_inuse(tech_pvt->play_buffer) /
+            //                  (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0);
         }
         switch_mutex_unlock(tech_pvt->play_mutex);
 
         if (!injected) {
             // 缓冲区为空，不替换音频，保持原始通话音频透传
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame: buffer empty, passthrough original audio\n",
-                              tech_pvt->sessionId);
             return;
         }
 
