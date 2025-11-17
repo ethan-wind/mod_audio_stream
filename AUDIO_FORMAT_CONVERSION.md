@@ -11,13 +11,18 @@
 从 WebSocket 接收的原始音频数据：
 
 ```
-格式: Float32 (32-bit 浮点数)
-采样率: 可变 (例如: 24000 Hz)
+格式: 32-bit Float (IEEE 754 浮点数)
+采样率: 24000 Hz
 声道: 单声道 (Mono)
+位深: 32-bit (4 字节/样本)
 字节序: 小端序 (Little Endian)
 数值范围: [-1.0, 1.0]
 传输编码: Base64
 ```
+
+**示例数据大小计算**：
+- 1 秒音频 = 24000 samples × 4 bytes = 96,000 bytes
+- 100ms 音频 = 2400 samples × 4 bytes = 9,600 bytes
 
 ### 2. 转换步骤
 
@@ -26,49 +31,69 @@
 rawAudio = base64_decode(jsonAudio->valuestring);
 ```
 
-#### 步骤 2: Float32 → 16-bit Linear PCM
+#### 步骤 2: 32-bit Float → 16-bit Linear PCM
 ```cpp
-// 输入: Float32 [-1.0, 1.0]
-// 输出: 16-bit PCM [-32768, 32767]
+// 输入: 32-bit Float [-1.0, 1.0] @ 24000 Hz
+// 输出: 16-bit PCM [-32767, 32767] @ 24000 Hz
+
+size_t input_samples = rawAudio.size() / sizeof(float);  // 除以 4
+const float* float_data = reinterpret_cast<const float*>(rawAudio.data());
 
 for (size_t i = 0; i < input_samples; i++) {
     float sample = float_data[i];
     
-    // 限幅处理
+    // 限幅处理，防止溢出
     if (sample > 1.0f) sample = 1.0f;
     if (sample < -1.0f) sample = -1.0f;
     
-    // 转换公式
+    // 转换公式: Float → 16-bit PCM
     pcm16bit[i] = static_cast<int16_t>(sample * 32767.0f);
 }
 ```
 
+**转换说明**：
+- **输入**: 32-bit Float (4 字节/样本)
+- **输出**: 16-bit PCM (2 字节/样本)
+- **数据量减半**: 96,000 bytes → 48,000 bytes (1秒音频)
+
 **为什么使用 32767 而不是 32768？**
-- 保持对称性：-1.0 → -32767, 1.0 → 32767
-- 避免溢出：32768 超出 int16_t 范围
+- 保持对称性：-1.0 → -32767, 0.0 → 0, 1.0 → 32767
+- 避免溢出：32768 超出 int16_t 范围 [-32768, 32767]
+- 符合音频处理标准实践
 
 #### 步骤 3: 重采样到通话采样率
 ```cpp
 // 使用 SpeexDSP 高质量重采样器
+// 输入: 16-bit PCM @ 24000 Hz
+// 输出: 16-bit PCM @ 8000 或 16000 Hz
+
 SpeexResamplerState* resampler = speex_resampler_init(
     1,                          // 单声道
-    sampleRate,                 // 输入采样率 (如 24000 Hz)
-    target_rate,                // 输出采样率 (如 8000 或 16000 Hz)
+    24000,                      // 输入采样率 (固定 24000 Hz)
+    target_rate,                // 输出采样率 (8000 或 16000 Hz)
     SWITCH_RESAMPLE_QUALITY,    // 高质量模式
     &err
 );
 
 speex_resampler_process_int(resampler, 0,
-                            pcm16bit.data(),
+                            pcm16bit.data(),      // 输入: 24000 Hz
                             &in_len,
-                            playbackSamples.data(),
+                            playbackSamples.data(), // 输出: 8000/16000 Hz
                             &out_len);
 ```
 
-**常见采样率转换：**
-- 24000 Hz → 8000 Hz (降采样 3:1)
-- 24000 Hz → 16000 Hz (降采样 3:2)
-- 16000 Hz → 8000 Hz (降采样 2:1)
+**采样率转换比例**：
+- **24000 Hz → 8000 Hz**: 降采样 3:1
+  - 输入: 2400 samples (100ms) → 输出: 800 samples (100ms)
+  - 数据量: 4800 bytes → 1600 bytes
+- **24000 Hz → 16000 Hz**: 降采样 3:2
+  - 输入: 2400 samples (100ms) → 输出: 1600 samples (100ms)
+  - 数据量: 4800 bytes → 3200 bytes
+
+**为什么需要降采样？**
+- VoIP 通话通常使用 8000 Hz (窄带) 或 16000 Hz (宽带)
+- 24000 Hz 对于电话通话来说过高，会浪费带宽
+- FreeSWitch 要求音频采样率与通话会话匹配
 
 #### 步骤 4: 写入播放缓冲区
 ```cpp
@@ -119,14 +144,21 @@ void stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
 
 ## 格式对比表
 
-| 阶段 | 格式 | 采样率 | 位深度 | 字节序 |
-|------|------|--------|--------|--------|
-| WebSocket 接收 | Float32 | 可变 (如 24000 Hz) | 32-bit | 小端序 |
-| 转换后 | 16-bit PCM | 可变 (如 24000 Hz) | 16-bit | 小端序 |
-| 重采样后 | 16-bit PCM | 通话采样率 (8000/16000 Hz) | 16-bit | 小端序 |
-| 播放缓冲区 | 16-bit PCM | 通话采样率 (8000/16000 Hz) | 16-bit | 小端序 |
-| WRITE_REPLACE | 16-bit PCM | 通话采样率 (8000/16000 Hz) | 16-bit | 小端序 |
-| 文件保存 | G.711 A-law | 8000 Hz | 8-bit | 小端序 |
+| 阶段 | 格式 | 采样率 | 位深度 | 字节/样本 | 字节序 | 1秒数据量 |
+|------|------|--------|--------|----------|--------|----------|
+| WebSocket 接收 | 32-bit Float | 24000 Hz | 32-bit | 4 bytes | 小端序 | 96,000 bytes |
+| Float→PCM 转换 | 16-bit PCM | 24000 Hz | 16-bit | 2 bytes | 小端序 | 48,000 bytes |
+| 重采样 (8kHz) | 16-bit PCM | 8000 Hz | 16-bit | 2 bytes | 小端序 | 16,000 bytes |
+| 重采样 (16kHz) | 16-bit PCM | 16000 Hz | 16-bit | 2 bytes | 小端序 | 32,000 bytes |
+| 播放缓冲区 | 16-bit PCM | 8000/16000 Hz | 16-bit | 2 bytes | 小端序 | 16k/32k bytes |
+| WRITE_REPLACE | 16-bit PCM | 8000/16000 Hz | 16-bit | 2 bytes | 小端序 | 16k/32k bytes |
+| 文件保存 | G.711 A-law | 8000 Hz | 8-bit | 1 byte | 小端序 | 8,000 bytes |
+
+**数据量变化**：
+- 原始 WebSocket: 96 KB/秒 (32-bit Float @ 24kHz)
+- 转换后: 48 KB/秒 (16-bit PCM @ 24kHz) - **减少 50%**
+- 重采样到 8kHz: 16 KB/秒 - **减少 83%**
+- 重采样到 16kHz: 32 KB/秒 - **减少 67%**
 
 ## 关键技术点
 
@@ -158,21 +190,38 @@ const size_t play_buflen = desiredSampling * channels * sizeof(int16_t) * 10;
 ## 数据流向图
 
 ```
-WebSocket (Float32, 24000Hz)
+WebSocket 接收
+│ 格式: 32-bit Float, 24000 Hz, Mono, LE
+│ 数据量: 96 KB/秒
+│ Base64 编码
     ↓ Base64 解码
-Raw Float32 数据
-    ↓ Float32 → 16-bit PCM
-16-bit PCM (24000Hz)
-    ↓ SpeexDSP 重采样
-16-bit PCM (8000/16000Hz)
+Raw 32-bit Float 数据
+│ 24000 samples/秒 × 4 bytes = 96 KB/秒
+    ↓ Float32 → 16-bit PCM 转换
+16-bit PCM @ 24000 Hz
+│ 24000 samples/秒 × 2 bytes = 48 KB/秒
+│ 数据量减少 50%
+    ↓ SpeexDSP 重采样 (3:1 或 3:2)
+16-bit PCM @ 8000 或 16000 Hz
+│ 8000 Hz: 16 KB/秒 (降采样 3:1)
+│ 16000 Hz: 32 KB/秒 (降采样 3:2)
     ↓ 写入播放缓冲区
-播放缓冲区 (16-bit PCM)
+播放缓冲区 (10秒容量)
+│ 格式: 16-bit Linear PCM
+│ 采样率: 与通话一致
+│ 缓冲区大小: 160 KB (8kHz) 或 320 KB (16kHz)
     ↓ 每 20ms 读取一帧
-WRITE_REPLACE 帧 (16-bit PCM)
+WRITE_REPLACE 回调
+│ 8000 Hz: 320 bytes/帧 (160 samples)
+│ 16000 Hz: 640 bytes/帧 (320 samples)
     ↓ FreeSWitch 自动编码
-通话编解码器 (G.711/Opus/etc.)
-    ↓ 发送到对端
-对端听到的音频
+通话编解码器
+│ G.711 A-law/μ-law (8 kbps)
+│ Opus (6-510 kbps)
+│ G.722 (64 kbps)
+│ 等等
+    ↓ RTP 传输
+对端接收并播放
 ```
 
 ## 代码位置
