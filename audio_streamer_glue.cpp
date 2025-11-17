@@ -329,14 +329,17 @@ public:
                         return status;
                     }
                     
-                    // 只处理raw格式的音频，使用SpeexDSP转换为8000Hz
+                    // 只处理raw格式的音频，转换为 FreeSWitch 可播放的格式
                     if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw") && sampleRate > 0) {
                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                          "(%s) processMessage - processing raw audio: %d Hz, size: %zu bytes (Float32 format)\n",
+                                          "(%s) Processing WebSocket audio: %d Hz, %zu bytes (Float32 LE)\n",
                                           m_sessionId.c_str(), sampleRate, rawAudio.size());
                         
-                        // 步骤 1: 将 Float32 转换为 16-bit PCM（小端序）
-                        // 原始格式：Float32, 24000Hz, 单声道, 小端序
+                        // ========== 步骤 1: Float32 → 16-bit Linear PCM ==========
+                        // 输入格式: Float32 [-1.0, 1.0], 可变采样率, 单声道, 小端序
+                        // 输出格式: 16-bit Linear PCM [-32768, 32767], 小端序
+                        // FreeSWitch 内部使用 16-bit Linear PCM 处理音频
+                        
                         size_t input_samples = rawAudio.size() / sizeof(float);
                         std::vector<int16_t> pcm16bit(input_samples);
                         
@@ -345,16 +348,17 @@ public:
                         for (size_t i = 0; i < input_samples; i++) {
                             float sample = float_data[i];
                             
-                            // Float32 范围通常是 [-1.0, 1.0]，限幅处理
+                            // 限幅处理，防止溢出
                             if (sample > 1.0f) sample = 1.0f;
                             if (sample < -1.0f) sample = -1.0f;
                             
-                            // 转换为 16-bit PCM: float * 32767
+                            // Float32 [-1.0, 1.0] → 16-bit PCM [-32768, 32767]
+                            // 使用 32767 而不是 32768 以保持对称性
                             pcm16bit[i] = static_cast<int16_t>(sample * 32767.0f);
                         }
                         
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                          "(%s) processMessage - converted Float32 to 16-bit PCM: %zu samples\n",
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                          "(%s) Step 1: Float32 → 16-bit PCM: %zu samples\n",
                                           m_sessionId.c_str(), input_samples);
                         
                         // 获取 tech_pvt 用于流式播放
@@ -364,16 +368,31 @@ public:
                             tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
                         }
                         
-                        // 步骤 2a: 流式播放 - 重采样到通话采样率并写入播放缓冲区
+                        // ========== 步骤 2: 重采样并写入播放缓冲区 ==========
+                        // 目标格式 (FreeSWitch 播放格式):
+                        //   - 编码: 16-bit Linear PCM
+                        //   - 采样率: 通话采样率 (8000/16000 Hz)
+                        //   - 声道: 单声道
+                        //   - 字节序: 小端序
+                        //   - 帧长: 20ms
                         if (tech_pvt && tech_pvt->stream_play_enabled) {
-                            int target_rate = tech_pvt->sampling;
+                            int target_rate = tech_pvt->sampling;      // 通话采样率 (8000/16000 Hz)
+                            int target_channels = tech_pvt->channels;  // 通话声道数 (通常为1)
                             std::vector<int16_t> playbackSamples;
                             
+                            // 重采样到目标采样率
                             if (sampleRate != target_rate) {
                                 int err;
-                                SpeexResamplerState* resampler = speex_resampler_init(1, sampleRate, target_rate, SWITCH_RESAMPLE_QUALITY, &err);
+                                SpeexResamplerState* resampler = speex_resampler_init(
+                                    1,              // 输入声道数 (单声道)
+                                    sampleRate,     // 输入采样率
+                                    target_rate,    // 输出采样率 (通话采样率)
+                                    SWITCH_RESAMPLE_QUALITY, 
+                                    &err
+                                );
                                 
                                 if (err == 0 && resampler) {
+                                    // 计算输出样本数，防止溢出
                                     size_t output_samples = ((uint64_t)input_samples * target_rate + sampleRate - 1) / sampleRate;
                                     playbackSamples.resize(output_samples);
                                     spx_uint32_t in_len = input_samples;
@@ -387,19 +406,34 @@ public:
                                     
                                     playbackSamples.resize(out_len);
                                     speex_resampler_destroy(resampler);
+                                    
+                                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                        "(%s) Resampled for playback: %d Hz → %d Hz (%zu → %u samples)\n",
+                                        m_sessionId.c_str(), sampleRate, target_rate, input_samples, out_len);
                                 } else {
+                                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                                        "(%s) Failed to init resampler for playback: %s\n",
+                                        m_sessionId.c_str(), speex_resampler_strerror(err));
                                     playbackSamples = pcm16bit;
                                 }
                             } else {
+                                // 采样率匹配，直接使用
                                 playbackSamples = pcm16bit;
+                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                    "(%s) No resampling needed for playback: %d Hz\n",
+                                    m_sessionId.c_str(), sampleRate);
                             }
                             
-                            // 写入播放缓冲区
+                            // 验证数据格式：16-bit PCM, 小端序
+                            // playbackSamples 已经是 std::vector<int16_t>，符合要求
+                            
+                            // 写入播放缓冲区 (格式: 16-bit Linear PCM, 小端序)
                             switch_mutex_lock(tech_pvt->play_mutex);
                             size_t data_size = playbackSamples.size() * sizeof(int16_t);
                             size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
                             
                             if (available >= data_size) {
+                                // 直接写入 16-bit PCM 数据 (小端序)
                                 switch_buffer_write(tech_pvt->play_buffer,
                                                    (uint8_t*)playbackSamples.data(),
                                                    data_size);
@@ -408,13 +442,13 @@ public:
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                                 
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                    "(%s) Streaming playback: queued %zu samples @ %d Hz (buffer: %.2f ms, available: %zu bytes)\n",
-                                    m_sessionId.c_str(), playbackSamples.size(), target_rate, buffer_ms, available);
+                                    "(%s) Queued for playback: %zu samples (%zu bytes) @ %d Hz, %d ch | Buffer: %.2f ms\n",
+                                    m_sessionId.c_str(), playbackSamples.size(), data_size, target_rate, target_channels, buffer_ms);
                             } else {
                                 size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                                    "(%s) Play buffer full (%.2f ms), dropping %zu samples (need %zu bytes, available %zu bytes)\n",
+                                    "(%s) Play buffer full (%.2f ms), dropping %zu samples (%zu bytes, available: %zu bytes)\n",
                                     m_sessionId.c_str(), buffer_ms, playbackSamples.size(), data_size, available);
                             }
                             switch_mutex_unlock(tech_pvt->play_mutex);
@@ -739,6 +773,7 @@ namespace {
 
 extern "C" {
     // 流式播放函数：从播放缓冲区读取音频并注入到通话中（WRITE_REPLACE）
+    // 播放格式: 16-bit Linear PCM, 通话采样率, 单声道, 小端序, 20ms 帧
     void stream_play_frame(switch_media_bug_t *bug, private_t *tech_pvt) {
         switch_core_session_t *session = switch_core_media_bug_get_session(bug);
         
@@ -784,9 +819,12 @@ extern "C" {
             return;
         }
 
-        // 以 20ms 为目标帧长，如果已有 datalen 就用现有大小
+        // 计算 20ms 帧长度 (16-bit PCM 格式)
+        // 公式: samples_per_20ms = sampling_rate * 0.02
+        //       bytes = samples * channels * sizeof(int16_t)
         size_t target_bytes = out_frame->datalen;
         if (!target_bytes) {
+            // 标准 20ms 帧: 8000Hz=320字节, 16000Hz=640字节
             target_bytes = FRAME_SIZE_8000 * tech_pvt->sampling / 8000 * tech_pvt->channels;
         }
         if (target_bytes > out_frame->buflen) {
@@ -804,20 +842,23 @@ extern "C" {
                 read_size = inuse;
             }
 
+            // 从缓冲区读取 16-bit Linear PCM 数据 (小端序)
             switch_buffer_read(tech_pvt->play_buffer, out_frame->data, read_size);
             injected = true;
 
+            // 如果数据不足一帧，用静音填充 (0x0000 = 静音)
             if (read_size < target_bytes) {
                 memset((uint8_t*)out_frame->data + read_size, 0, target_bytes - read_size);
             }
 
+            // 设置帧参数 (FreeSWitch 播放格式)
             out_frame->datalen = target_bytes;
             out_frame->samples = target_bytes / (tech_pvt->channels * sizeof(int16_t));
-            out_frame->rate = tech_pvt->sampling;
-            out_frame->channels = tech_pvt->channels;
+            out_frame->rate = tech_pvt->sampling;        // 通话采样率
+            out_frame->channels = tech_pvt->channels;    // 通话声道数
 
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                              "(%s) stream_play_frame injected %zu/%zu bytes, %u samples @ %d Hz, %d ch (buffer left: %.2f ms)\n",
+                              "(%s) Injected audio: %zu/%zu bytes, %u samples @ %d Hz, %d ch | Buffer left: %.2f ms\n",
                               tech_pvt->sessionId,
                               read_size,
                               target_bytes,
@@ -830,14 +871,15 @@ extern "C" {
         switch_mutex_unlock(tech_pvt->play_mutex);
 
         if (!injected) {
-            // 不调用 set_write_replace_frame，保持原始音频
+            // 缓冲区为空，不替换音频，保持原始通话音频透传
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame: buffer empty, passthrough\n",
+                              "(%s) stream_play_frame: buffer empty, passthrough original audio\n",
                               tech_pvt->sessionId);
             return;
         }
 
-        // 设置替换帧，让本次写方向（播放给线路）用我们准备的音频
+        // 设置替换帧，让本次写方向（播放给线路）使用我们准备的音频
+        // FreeSWitch 会自动处理后续的编码 (G.711/Opus/etc.)
         switch_core_media_bug_set_write_replace_frame(bug, out_frame);
     }
     
