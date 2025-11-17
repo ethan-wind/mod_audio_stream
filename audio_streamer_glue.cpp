@@ -281,10 +281,18 @@ public:
                                   jsonAudio && jsonAudio->valuestring ? "present" : "NULL");
                 
                 std::string fileType;
-                int sampleRate = 16000;
+                int sampleRate = 0;
                 if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "raw")) {
                     cJSON* jsonSampleRate = cJSON_GetObjectItem(jsonData, "sampleRate");
-                    sampleRate = jsonSampleRate && jsonSampleRate->valueint ? jsonSampleRate->valueint : 0;
+                    if (jsonSampleRate && jsonSampleRate->valueint > 0) {
+                        sampleRate = jsonSampleRate->valueint;
+                    } else {
+                        // 如果 JSON 中没有 sampleRate 或值无效，假设是 24000 Hz
+                        sampleRate = 24000;
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                            "(%s) JSON 中缺少或无效 sampleRate，假设为 24000 Hz\n", m_sessionId.c_str());
+                    }
+                    
                     std::unordered_map<int, const char*> sampleRateMap = {
                             {8000, ".r8"},
                             {16000, ".r16"},
@@ -297,7 +305,7 @@ public:
                     fileType = (it != sampleRateMap.end()) ? it->second : "";
                     
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) processMessage - raw audio, sampleRate: %d, fileType: %s\n",
+                                      "(%s) 接收音频: sampleRate=%d Hz, fileType=%s\n",
                                       m_sessionId.c_str(), sampleRate, fileType.c_str());
                 } else if (jsAudioDataType && 0 == strcmp(jsAudioDataType, "wav")) {
                     fileType = ".wav";
@@ -408,6 +416,14 @@ public:
                         if (tech_pvt && tech_pvt->stream_play_enabled) {
                             int target_rate = tech_pvt->sampling;      // 通话采样率 (8000/16000 Hz)
                             int target_channels = tech_pvt->channels;  // 通话声道数 (通常为1)
+                            
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                "(%s) ========== 重采样 ==========\n", m_sessionId.c_str());
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                "(%s) 输入: %d Hz, %zu samples | 目标: %d Hz | 需要重采样: %s\n",
+                                m_sessionId.c_str(), sampleRate, input_samples, target_rate,
+                                sampleRate != target_rate ? "是" : "否");
+                            
                             std::vector<int16_t> playbackSamples;
                             
                             // 使用 SpeexDSP 重采样器进行高质量重采样
