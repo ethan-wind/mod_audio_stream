@@ -891,9 +891,19 @@ extern "C" {
             return;
         }
         
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                          "(%s) stream_play_frame: called\n",
-                          tech_pvt->sessionId);
+        // 计算回调频率
+        static uint64_t last_call_time = 0;
+        static int call_count = 0;
+        uint64_t now = switch_time_now();
+        if (last_call_time > 0 && call_count < 10) {
+            uint64_t interval_us = now - last_call_time;
+            double interval_ms = interval_us / 1000.0;
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) stream_play_frame 回调间隔: %.2f ms\n",
+                tech_pvt->sessionId, interval_ms);
+            call_count++;
+        }
+        last_call_time = now;
 
         // 从 media bug 获取写方向的替换帧（播放给线路的音频）
         switch_frame_t *out_frame = switch_core_media_bug_get_write_replace_frame(bug);
