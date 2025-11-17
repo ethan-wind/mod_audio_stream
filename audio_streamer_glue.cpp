@@ -737,6 +737,13 @@ namespace {
         tech_pvt->rtp_packets = rtp_packets;
         tech_pvt->channels = channels;
         tech_pvt->audio_paused = 0;
+        
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            "(%s) ========== 初始化 ==========\n", tech_pvt->sessionId);
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            "(%s) 通话采样率: %u Hz (tech_pvt->sampling)\n", tech_pvt->sessionId, sampling);
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            "(%s) 用户指定采样率: %d Hz (desiredSampling)\n", tech_pvt->sessionId, desiredSampling);
 
         if (metadata) strncpy(tech_pvt->initialMetadata, metadata, MAX_METADATA_LEN);
 
@@ -903,6 +910,7 @@ extern "C" {
         // 计算 20ms 帧长度 (16-bit PCM 格式)
         // 公式: samples_per_20ms = sampling_rate * 0.02
         //       bytes = samples * channels * sizeof(int16_t)
+        size_t original_datalen = out_frame->datalen;
         size_t target_bytes = out_frame->datalen;
         if (!target_bytes) {
             // 标准 20ms 帧: 8000Hz=320字节, 16000Hz=640字节
@@ -910,6 +918,14 @@ extern "C" {
         }
         if (target_bytes > out_frame->buflen) {
             target_bytes = out_frame->buflen;
+        }
+        
+        // 添加日志：检查帧长度
+        static int log_count = 0;
+        if (log_count++ < 5) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 帧长度: original_datalen=%zu, target_bytes=%zu, buflen=%zu, sampling=%d Hz\n",
+                tech_pvt->sessionId, original_datalen, target_bytes, out_frame->buflen, tech_pvt->sampling);
         }
 
         bool injected = false;
