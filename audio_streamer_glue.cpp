@@ -716,7 +716,7 @@ namespace {
 
         strncpy(tech_pvt->sessionId, switch_core_session_get_uuid(session), MAX_SESSION_ID);
         strncpy(tech_pvt->ws_uri, wsUri, MAX_WS_URI);
-        tech_pvt->sampling = desiredSampling;
+        tech_pvt->sampling = sampling;  // 使用通话采样率，不是 desiredSampling
         tech_pvt->responseHandler = responseHandler;
         tech_pvt->rtp_packets = rtp_packets;
         tech_pvt->channels = channels;
@@ -742,7 +742,7 @@ namespace {
         }
         
         // 初始化播放缓冲区（10秒缓冲，用于流式播放，防止突发音频丢失）
-        const size_t play_buflen = desiredSampling * channels * sizeof(int16_t) * 10;
+        const size_t play_buflen = sampling * channels * sizeof(int16_t) * 10;
         if (switch_buffer_create(pool, &tech_pvt->play_buffer, play_buflen) != SWITCH_STATUS_SUCCESS) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                 "%s: Error creating play buffer.\n", tech_pvt->sessionId);
@@ -765,25 +765,31 @@ namespace {
         memset(&tech_pvt->write_frame, 0, sizeof(tech_pvt->write_frame));
         tech_pvt->write_frame.data = tech_pvt->write_frame_data;
         tech_pvt->write_frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-        tech_pvt->write_frame.rate = desiredSampling;
+        tech_pvt->write_frame.rate = sampling;  // 使用通话采样率
         tech_pvt->write_frame.channels = channels;
         
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-            "(%s) Stream play enabled with buffer size: %zu bytes (%.2f seconds)\n",
+            "(%s) Stream play enabled with buffer size: %zu bytes (%.2f seconds) @ %u Hz\n",
             tech_pvt->sessionId, play_buflen, 
-            (double)play_buflen / (desiredSampling * channels * sizeof(int16_t)));
+            (double)play_buflen / (sampling * channels * sizeof(int16_t)),
+            sampling);
 
 
+        // 注意：这里的 resampler 是用于上行音频（READ 方向）的重采样
+        // desiredSampling 是用户指定的采样率，sampling 是通话采样率
         if (desiredSampling != sampling) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) resampling from %u to %u\n", tech_pvt->sessionId, sampling, desiredSampling);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+                "(%s) 上行重采样: %u Hz → %u Hz\n", tech_pvt->sessionId, sampling, desiredSampling);
             tech_pvt->resampler = speex_resampler_init(channels, sampling, desiredSampling, SWITCH_RESAMPLE_QUALITY, &err);
             if (0 != err) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, "Error initializing resampler: %s.\n", speex_resampler_strerror(err));
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR, 
+                    "Error initializing resampler: %s.\n", speex_resampler_strerror(err));
                 return SWITCH_STATUS_FALSE;
             }
         }
         else {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) no resampling needed for this call\n", tech_pvt->sessionId);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, 
+                "(%s) 上行无需重采样: %u Hz\n", tech_pvt->sessionId, sampling);
         }
 
         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG, "(%s) stream_data_init\n", tech_pvt->sessionId);
