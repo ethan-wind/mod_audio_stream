@@ -50,11 +50,12 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             break;
 
         case SWITCH_ABC_TYPE_WRITE:
+            /* WRITE 方向：不处理，让音频正常透传 */
+            return SWITCH_TRUE;
+            break;
+            
         case SWITCH_ABC_TYPE_WRITE_REPLACE:
             /* 下行：将 TTS 音频播放给线路 */
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                              "(%s) capture_callback WRITE/WRITE_REPLACE (type=%d) - stream_play_enabled=%d\n",
-                              tech_pvt->sessionId, type, tech_pvt->stream_play_enabled);
             if (tech_pvt->stream_play_enabled) {
                 stream_play_frame(bug, tech_pvt);
             }
