@@ -51,7 +51,8 @@ enum notifyEvent_t {
     CONNECT_SUCCESS,
     CONNECT_ERROR,
     CONNECTION_DROPPED,
-    MESSAGE
+    MESSAGE,
+    BINARY_MESSAGE
 };
 
 #ifdef __cplusplus
