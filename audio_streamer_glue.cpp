@@ -148,12 +148,59 @@ public:
         // Setup a callback to be fired when a message or an event (open, close, error) is received
         // 支持文本消息（JSON）和二进制消息（原始 PCM S16BE）
         client.setMessageCallback([this](const std::string& message) {
-            eventCallback(MESSAGE, message.c_str());
-        });
-        
-        // Setup binary message callback for raw PCM S16BE audio stream
-        client.setBinaryCallback([this](const std::string& data) {
-            eventCallback(BINARY_MESSAGE, data.c_str(), data.size());
+            if (message.empty()) {
+                return;
+            }
+            
+            // 消息类型判断：区分 JSON 文本和二进制音频
+            bool is_binary = false;
+            
+            // 方法1: 检查是否为有效的 JSON 格式
+            // JSON 必须以 '{' 或 '[' 开头（忽略前导空白）
+            size_t first_char_pos = 0;
+            while (first_char_pos < message.size() && 
+                   (message[first_char_pos] == ' ' || 
+                    message[first_char_pos] == '\t' || 
+                    message[first_char_pos] == '\n' || 
+                    message[first_char_pos] == '\r')) {
+                first_char_pos++;
+            }
+            
+            if (first_char_pos < message.size()) {
+                char first_char = message[first_char_pos];
+                // JSON 必须以 '{' 或 '[' 开头
+                if (first_char != '{' && first_char != '[') {
+                    is_binary = true;
+                }
+                
+                // 方法2: 检查是否包含非可打印字符（二进制数据特征）
+                // 如果前 16 字节中有超过 25% 的非可打印字符，视为二进制
+                if (!is_binary && message.size() >= 16) {
+                    int non_printable = 0;
+                    size_t check_len = std::min(message.size(), (size_t)64);
+                    for (size_t i = 0; i < check_len; i++) {
+                        unsigned char c = (unsigned char)message[i];
+                        // 非可打印字符（除了常见的空白字符）
+                        if (c < 32 && c != '\t' && c != '\n' && c != '\r') {
+                            non_printable++;
+                        } else if (c >= 127) {
+                            non_printable++;
+                        }
+                    }
+                    // 如果超过 25% 是非可打印字符，视为二进制
+                    if (non_printable > check_len / 4) {
+                        is_binary = true;
+                    }
+                }
+            }
+            
+            if (is_binary) {
+                // 处理为二进制音频数据
+                eventCallback(BINARY_MESSAGE, message.c_str(), message.size());
+            } else {
+                // 处理为 JSON 文本消息
+                eventCallback(MESSAGE, message.c_str(), 0);
+            }
         });
 
         client.setOpenCallback([this]() {
@@ -252,7 +299,7 @@ public:
                     media_bug_close(psession);
 
                     break;
-                case MESSAGE:
+                case MESSAGE: {
                     std::string msg(message);
                     if(processMessage(psession, msg) != SWITCH_TRUE) {
                         m_notify(psession, EVENT_JSON, msg.c_str());
@@ -260,10 +307,12 @@ public:
                     // if(!m_suppress_log)
                         // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG, "response: %s\n", msg.c_str());
                     break;
-                case BINARY_MESSAGE:
+                }
+                case BINARY_MESSAGE: {
                     // 处理原始 PCM S16BE 二进制数据流
                     processBinaryAudio(psession, (const uint8_t*)message, len);
                     break;
+                }
             }
             switch_core_session_rwunlock(psession);
         }

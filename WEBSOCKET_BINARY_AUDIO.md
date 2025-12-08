@@ -155,32 +155,49 @@ const size_t play_buflen = sampling * channels * sizeof(int16_t) * 10;
 
 ## 兼容性说明
 
-### WebSocketClient 库要求
+### WebSocketClient 库兼容性
 
-本修改假设 `WebSocketClient` 类（来自 `libs/libwsc` 子模块）支持以下方法：
+本实现使用 **智能消息类型检测** 方式，无需修改 `libwsc` 库。
 
-```cpp
-void setBinaryCallback(std::function<void(const std::string&)> callback);
+#### 检测逻辑（多重验证）
+
+**方法 1: JSON 格式检测**
+- 忽略前导空白字符（空格、制表符、换行符）
+- 检查第一个有效字符是否为 `{` 或 `[`
+- JSON 必须以这两个字符之一开头
+
+**方法 2: 二进制特征检测**
+- 检查前 64 字节中的非可打印字符比例
+- 如果超过 25% 是非可打印字符 → 视为二进制数据
+- 排除常见空白字符（`\t`, `\n`, `\r`）
+
+**判断流程：**
+```
+消息到达
+    ↓
+检查是否为空 → 是 → 忽略
+    ↓ 否
+跳过前导空白
+    ↓
+第一个字符是 '{' 或 '[' ? 
+    ↓ 否
+    视为二进制 ✓
+    ↓ 是
+检查非可打印字符比例
+    ↓
+> 25% ? 
+    ↓ 是
+    视为二进制 ✓
+    ↓ 否
+    视为 JSON 文本 ✓
 ```
 
-如果该方法不存在，需要在 `libwsc` 库中添加二进制消息回调支持。
-
-### 替代方案
-
-如果 `libwsc` 不支持独立的二进制回调，可以在 `setMessageCallback` 中检测消息类型：
-
-```cpp
-client.setMessageCallback([this](const std::string& message) {
-    // 检测是否为二进制数据（非 JSON）
-    if (message.size() > 0 && message[0] != '{') {
-        // 处理为二进制音频
-        eventCallback(BINARY_MESSAGE, message.c_str(), message.size());
-    } else {
-        // 处理为 JSON 文本消息
-        eventCallback(MESSAGE, message.c_str());
-    }
-});
-```
+**优点：**
+- ✅ 兼容现有 `libwsc` 库，无需修改
+- ✅ 支持带前导空白的 JSON
+- ✅ 准确识别二进制音频数据
+- ✅ 防止误判（多重验证）
+- ✅ 性能优化（只检查前 64 字节）
 
 ## 调试日志
 
