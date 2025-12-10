@@ -46,16 +46,20 @@ enum notifyEvent_t {
 };
 ```
 
-#### 2.2 添加二进制消息回调
+#### 2.2 消息回调支持文本/二进制判定
 
 **文件：`audio_streamer_glue.cpp`**
 
-在 `AudioStreamer` 构造函数中添加了二进制消息回调：
+在 `AudioStreamer` 构造函数中复用 `setMessageCallback`，按首个非空白字符判断消息类型：
 
 ```cpp
-// Setup binary message callback for raw PCM S16BE audio stream
-client.setBinaryCallback([this](const std::string& data) {
-    eventCallback(BINARY_MESSAGE, data.c_str(), data.size());
+client.setMessageCallback([this](const std::string& message) {
+    if (message.empty()) return;
+    size_t pos = 0;
+    while (pos < message.size() && isspace(message[pos])) pos++;
+    bool is_binary = (pos >= message.size()) ||
+                     (message[pos] != '{' && message[pos] != '[');
+    eventCallback(is_binary ? BINARY_MESSAGE : MESSAGE, message.c_str(), message.size());
 });
 ```
 
@@ -157,47 +161,11 @@ const size_t play_buflen = sampling * channels * sizeof(int16_t) * 10;
 
 ### WebSocketClient 库兼容性
 
-本实现使用 **智能消息类型检测** 方式，无需修改 `libwsc` 库。
+本实现使用 **首字符判定** 的智能检测，无需改动 `libwsc`：
 
-#### 检测逻辑（多重验证）
-
-**方法 1: JSON 格式检测**
-- 忽略前导空白字符（空格、制表符、换行符）
-- 检查第一个有效字符是否为 `{` 或 `[`
-- JSON 必须以这两个字符之一开头
-
-**方法 2: 二进制特征检测**
-- 检查前 64 字节中的非可打印字符比例
-- 如果超过 25% 是非可打印字符 → 视为二进制数据
-- 排除常见空白字符（`\t`, `\n`, `\r`）
-
-**判断流程：**
-```
-消息到达
-    ↓
-检查是否为空 → 是 → 忽略
-    ↓ 否
-跳过前导空白
-    ↓
-第一个字符是 '{' 或 '[' ? 
-    ↓ 否
-    视为二进制 ✓
-    ↓ 是
-检查非可打印字符比例
-    ↓
-> 25% ? 
-    ↓ 是
-    视为二进制 ✓
-    ↓ 否
-    视为 JSON 文本 ✓
-```
-
-**优点：**
-- ✅ 兼容现有 `libwsc` 库，无需修改
-- ✅ 支持带前导空白的 JSON
-- ✅ 准确识别二进制音频数据
-- ✅ 防止误判（多重验证）
-- ✅ 性能优化（只检查前 64 字节）
+- 跳过前导空白后，首字符是 `{` 或 `[` → 视为 JSON 文本
+- 其余情况 → 视为二进制音频（原始 PCM）
+- 不再对 JSON 再做“非可打印字符比例”二次判定，避免包含大量 UTF-8 的合法 JSON 被误判为二进制
 
 ## 调试日志
 
@@ -206,7 +174,7 @@ const size_t play_buflen = sampling * channels * sizeof(int16_t) * 10;
 ```cpp
 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
     "(%s) 接收二进制音频: %zu bytes → %zu samples @ %d Hz | 缓冲区: %.2f ms\n",
-    m_sessionId.c_str(), len, playbackSamples.size(), target_rate, buffer_ms);
+    m_sessionId.c_str(), processed_len, playbackSamples.size(), target_rate, buffer_ms);
 ```
 
 ## 测试建议
@@ -228,12 +196,17 @@ switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
    - 测量端到端延迟
    - 检查音频是否流畅播放
 
+5. **验证长度对齐**
+   - 发送奇数字节长度的二进制帧
+   - 确认日志提示对齐处理，并只播放对齐部分
+
 ## 注意事项
 
 1. **字节序**：确保 WebSocket 发送端使用大端序（Big Endian）格式
 2. **采样率**：确保发送端和接收端采样率配置一致
 3. **缓冲区**：根据网络延迟调整缓冲区大小
 4. **性能**：大端序转换和重采样会消耗 CPU 资源
+5. **长度对齐**：二进制数据需 2 字节对齐，非对齐尾巴会被丢弃并记录日志
 
 ## 相关文件
 

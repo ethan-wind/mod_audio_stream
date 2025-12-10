@@ -168,29 +168,9 @@ public:
             
             if (first_char_pos < message.size()) {
                 char first_char = message[first_char_pos];
-                // JSON 必须以 '{' 或 '[' 开头
+                // JSON 必须以 '{' 或 '[' 开头；其他全部当作二进制
                 if (first_char != '{' && first_char != '[') {
                     is_binary = true;
-                }
-                
-                // 方法2: 检查是否包含非可打印字符（二进制数据特征）
-                // 如果前 16 字节中有超过 25% 的非可打印字符，视为二进制
-                if (!is_binary && message.size() >= 16) {
-                    int non_printable = 0;
-                    size_t check_len = std::min(message.size(), (size_t)64);
-                    for (size_t i = 0; i < check_len; i++) {
-                        unsigned char c = (unsigned char)message[i];
-                        // 非可打印字符（除了常见的空白字符）
-                        if (c < 32 && c != '\t' && c != '\n' && c != '\r') {
-                            non_printable++;
-                        } else if (c >= 127) {
-                            non_printable++;
-                        }
-                    }
-                    // 如果超过 25% 是非可打印字符，视为二进制
-                    if (non_printable > check_len / 4) {
-                        is_binary = true;
-                    }
                 }
             }
             
@@ -323,6 +303,15 @@ public:
         if (!data || len == 0) {
             return;
         }
+        size_t processed_len = len & ~((size_t)1);  // 必须是偶数字节，代表完整的 16-bit 样本
+        if (processed_len != len) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                "(%s) 二进制音频长度不是 2 字节对齐（%zu），仅处理前 %zu 字节\n",
+                m_sessionId.c_str(), len, processed_len);
+        }
+        if (processed_len == 0) {
+            return;
+        }
         
         // 输入格式: PCM S16BE (16-bit Signed Big Endian)
         // 假设采样率: 24000 Hz (可根据实际情况调整)
@@ -331,7 +320,7 @@ public:
         const int sampleRate = 24000;  // WebSocket 音频流采样率
         
         // 计算样本数 (16-bit = 2 bytes per sample)
-        size_t input_samples = len / sizeof(int16_t);
+        size_t input_samples = processed_len / sizeof(int16_t);
         
         // 步骤 1: 大端序转小端序 (S16BE → S16LE)
         std::vector<int16_t> pcm16bit(input_samples);
@@ -416,7 +405,7 @@ public:
                 
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
                     "(%s) 接收二进制音频: %zu bytes → %zu samples @ %d Hz | 缓冲区: %.2f ms\n",
-                    m_sessionId.c_str(), len, playbackSamples.size(), target_rate, buffer_ms);
+                    m_sessionId.c_str(), processed_len, playbackSamples.size(), target_rate, buffer_ms);
             } else {
                 size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
