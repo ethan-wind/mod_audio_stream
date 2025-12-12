@@ -314,10 +314,10 @@ public:
         }
         
         // 输入格式: PCM S16BE (16-bit Signed Big Endian)
-        // 假设采样率: 24000 Hz (可根据实际情况调整)
+        // 假设采样率: 8000 Hz (与通话采样率一致)
         // 声道: 单声道 (Mono)
         
-        const int sampleRate = 24000;  // WebSocket 音频流采样率
+        const int sampleRate = 8000;  // WebSocket 音频流采样率
         
         // 计算样本数 (16-bit = 2 bytes per sample)
         size_t input_samples = processed_len / sizeof(int16_t);
@@ -441,10 +441,10 @@ public:
                     if (jsonSampleRate && jsonSampleRate->valueint > 0) {
                         sampleRate = jsonSampleRate->valueint;
                     } else {
-                        // 如果 JSON 中没有 sampleRate 或值无效，假设是 24000 Hz
-                        sampleRate = 24000;
+                        // 如果 JSON 中没有 sampleRate 或值无效，假设是 8000 Hz
+                        sampleRate = 8000;
                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                            "(%s) JSON 中缺少或无效 sampleRate，假设为 24000 Hz\n", m_sessionId.c_str());
+                            "(%s) JSON 中缺少或无效 sampleRate，假设为 8000 Hz\n", m_sessionId.c_str());
                     }
                     
                     std::unordered_map<int, const char*> sampleRateMap = {

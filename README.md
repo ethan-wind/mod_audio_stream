@@ -255,7 +255,7 @@ This module supports receiving raw PCM S16BE (16-bit Signed Big Endian) binary a
 
 **Binary Stream Format:**
 - Encoding: PCM S16BE (16-bit Signed Big Endian)
-- Sample Rate: 24000 Hz (default, configurable)
+- Sample Rate: 8000 Hz (default, configurable)
 - Channels: Mono (1 channel)
 - Byte Order: Big Endian
 - No Base64 encoding
@@ -268,7 +268,7 @@ This module supports receiving raw PCM S16BE (16-bit Signed Big Endian) binary a
   "data": {
     "audioData": "base64_encoded_audio_data",
     "audioDataType": "raw",
-    "sampleRate": 24000
+    "sampleRate": 8000
   }
 }
 ```
@@ -283,15 +283,13 @@ The module automatically detects message type using a smart detection algorithm:
 ### Audio Processing Pipeline
 
 ```
-WebSocket Binary Data (PCM S16BE, 24000 Hz)
+WebSocket Binary Data (PCM S16BE, 8000 Hz)
     ↓
 Big Endian → Little Endian Conversion
     ↓
-PCM S16LE (24000 Hz, Mono)
+PCM S16LE (8000 Hz, Mono)
     ↓
-SpeexDSP Resampling
-    ↓
-PCM S16LE (8000/16000 Hz, Mono)
+No Resampling Needed (already 8000 Hz)
     ↓
 Play Buffer
     ↓
@@ -311,8 +309,8 @@ import websockets
 import numpy as np
 
 async def send_audio(websocket, path):
-    # Generate 440Hz sine wave at 24000Hz
-    sample_rate = 24000
+    # Generate 440Hz sine wave at 8000Hz
+    sample_rate = 8000
     duration = 1.0
     frequency = 440
     
@@ -337,7 +335,7 @@ const WebSocket = require('ws');
 const wss = new WebSocket.Server({ port: 8765 });
 
 wss.on('connection', (ws) => {
-    const sampleRate = 24000;
+    const sampleRate = 8000;
     const duration = 1.0;
     const frequency = 440;
     const numSamples = Math.floor(sampleRate * duration);
@@ -361,7 +359,7 @@ wss.on('connection', (ws) => {
 
 1. **WebSocket Reception**
    - Format: 32-bit Float or 16-bit PCM S16BE
-   - Sample Rate: 24000 Hz
+   - Sample Rate: 8000 Hz
    - Channels: Mono
    - Encoding: Base64 (for JSON) or Raw Binary
 
@@ -373,10 +371,10 @@ wss.on('connection', (ws) => {
    pcm16bit[i] = static_cast<int16_t>(sample * 32767.0f);
    ```
 
-3. **Resampling to Call Sample Rate**
-   - Uses SpeexDSP high-quality resampler
-   - 24000 Hz → 8000 Hz (3:1 downsampling)
-   - 24000 Hz → 16000 Hz (3:2 downsampling)
+3. **No Resampling Needed**
+   - WebSocket audio is already 8000 Hz
+   - Matches call sample rate directly
+   - No CPU overhead from resampling
 
 4. **Play Buffer Write**
    - Format: 16-bit Linear PCM
@@ -392,12 +390,11 @@ wss.on('connection', (ws) => {
 
 | Stage | Format | Sample Rate | Bit Depth | Bytes/Sample | Byte Order | Data Size (1s) |
 |-------|--------|-------------|-----------|--------------|------------|----------------|
-| WebSocket | 32-bit Float | 24000 Hz | 32-bit | 4 bytes | Little Endian | 96,000 bytes |
-| After Float→PCM | 16-bit PCM | 24000 Hz | 16-bit | 2 bytes | Little Endian | 48,000 bytes |
-| After Resampling (8kHz) | 16-bit PCM | 8000 Hz | 16-bit | 2 bytes | Little Endian | 16,000 bytes |
-| After Resampling (16kHz) | 16-bit PCM | 16000 Hz | 16-bit | 2 bytes | Little Endian | 32,000 bytes |
-| Play Buffer | 16-bit PCM | 8k/16k Hz | 16-bit | 2 bytes | Little Endian | 16k/32k bytes |
-| WRITE_REPLACE | 16-bit PCM | 8k/16k Hz | 16-bit | 2 bytes | Little Endian | 16k/32k bytes |
+| WebSocket | 32-bit Float | 8000 Hz | 32-bit | 4 bytes | Little Endian | 32,000 bytes |
+| After Float→PCM | 16-bit PCM | 8000 Hz | 16-bit | 2 bytes | Little Endian | 16,000 bytes |
+| No Resampling | 16-bit PCM | 8000 Hz | 16-bit | 2 bytes | Little Endian | 16,000 bytes |
+| Play Buffer | 16-bit PCM | 8000 Hz | 16-bit | 2 bytes | Little Endian | 16,000 bytes |
+| WRITE_REPLACE | 16-bit PCM | 8000 Hz | 16-bit | 2 bytes | Little Endian | 16,000 bytes |
 
 ## Streaming Playback Architecture
 
@@ -431,9 +428,9 @@ WebSocket → FreeSWITCH → Line
 
 **Audio Reception and Buffering:**
 ```cpp
-// Receive Float32 audio (24000 Hz)
+// Receive Float32 audio (8000 Hz)
 // Convert to 16-bit PCM
-// Resample to call sample rate
+// No resampling needed (already 8000 Hz)
 // Write to play buffer
 switch_buffer_write(tech_pvt->play_buffer,
                    (uint8_t*)playbackSamples.data(),
