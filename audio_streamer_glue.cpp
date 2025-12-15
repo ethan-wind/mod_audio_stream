@@ -148,9 +148,13 @@ public:
         // Setup a callback to be fired when a message or an event (open, close, error) is received
         // 支持文本消息（JSON）和二进制消息（原始 PCM S16BE）
         client.setMessageCallback([this](const std::string& message) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+                "(%s) 🔔 [WebSocket] 收到消息: size=%zu bytes\n",
+                m_sessionId.c_str(), message.size());
+            
             if (message.empty()) {
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-                    "(%s) 收到空消息\n", m_sessionId.c_str());
+                    "(%s) ⚠️ [WebSocket] 收到空消息\n", m_sessionId.c_str());
                 return;
             }
             
@@ -178,15 +182,15 @@ public:
             
             if (is_binary) {
                 // 处理为二进制音频数据
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-                    "(%s) 收到二进制消息: %zu bytes, 首字节=0x%02X\n",
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+                    "(%s) 🎵 [WebSocket] 识别为二进制消息: %zu bytes, 首字节=0x%02X\n",
                     m_sessionId.c_str(), message.size(), (uint8_t)message[0]);
                 eventCallback(BINARY_MESSAGE, message.c_str(), message.size());
             } else {
                 // 处理为 JSON 文本消息
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-                    "(%s) 收到JSON消息: %zu bytes\n",
-                    m_sessionId.c_str(), message.size());
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_NOTICE,
+                    "(%s) 📄 [WebSocket] 识别为JSON消息: %zu bytes, 内容前100字符: %.100s\n",
+                    m_sessionId.c_str(), message.size(), message.c_str());
                 eventCallback(MESSAGE, message.c_str(), 0);
             }
         });
@@ -302,9 +306,11 @@ public:
                 }
                 case BINARY_MESSAGE: {
                     // 处理原始 PCM S16BE 二进制数据流
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
-                        "(%s) 处理二进制音频: %zu bytes\n", m_sessionId.c_str(), len);
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_NOTICE,
+                        "(%s) 🎵 [eventCallback] 开始处理二进制音频: %zu bytes\n", m_sessionId.c_str(), len);
                     processBinaryAudio(psession, (const uint8_t*)message, len);
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_NOTICE,
+                        "(%s) ✅ [eventCallback] 二进制音频处理完成\n", m_sessionId.c_str());
                     break;
                 }
             }
@@ -317,8 +323,10 @@ public:
 
     // 处理原始 PCM S16BE 二进制音频流
     void processBinaryAudio(switch_core_session_t* session, const uint8_t* data, size_t len) {
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-            "(%s) processBinaryAudio 开始: len=%zu\n", m_sessionId.c_str(), len);
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+            "(%s) 🎵 [processBinaryAudio] ========== 开始处理 ==========\n", m_sessionId.c_str());
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+            "(%s) 🎵 [processBinaryAudio] 输入: len=%zu bytes\n", m_sessionId.c_str(), len);
         
         if (!data || len == 0) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
@@ -362,14 +370,19 @@ public:
         private_t *tech_pvt = nullptr;
         if (bug) {
             tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                "(%s) 获取到 media bug 和 tech_pvt\n", m_sessionId.c_str());
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+                "(%s) ✅ [processBinaryAudio] 获取到 media bug 和 tech_pvt\n", m_sessionId.c_str());
         } else {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                "(%s) 无法获取 media bug\n", m_sessionId.c_str());
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                "(%s) ❌ [processBinaryAudio] 无法获取 media bug - 无法播放音频！\n", m_sessionId.c_str());
+            return;
         }
         
         // 步骤 2: 重采样到通话采样率并写入播放缓冲区
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_NOTICE,
+            "(%s) 🔍 [processBinaryAudio] 检查播放条件: tech_pvt=%p, stream_play_enabled=%d\n",
+            m_sessionId.c_str(), tech_pvt, tech_pvt ? tech_pvt->stream_play_enabled : -1);
+        
         if (tech_pvt && tech_pvt->stream_play_enabled) {
             int target_rate = tech_pvt->sampling;      // 通话采样率 (8000/16000 Hz)
             int target_channels = tech_pvt->channels;  // 通话声道数 (通常为1)
