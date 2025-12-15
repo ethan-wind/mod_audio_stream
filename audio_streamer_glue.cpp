@@ -92,7 +92,8 @@ public:
                     bool suppressLog, const char* extra_headers, bool no_reconnect,
                     const char* tls_cafile, const char* tls_keyfile, const char* tls_certfile,
                     bool tls_disable_hostname_validation): m_sessionId(uuid), m_notify(callback),
-                    m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
+                    m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0),
+                    m_binary_buffer_enabled(true){
 
         WebSocketHeaders hdrs;
         WebSocketTLSOptions tls;
@@ -112,6 +113,12 @@ public:
         }
 
         client.setUrl(wsUri);
+        
+        // 配置二进制缓冲区大小（从环境变量或使用默认值）
+        // 默认 640 bytes = 20ms @ 16kHz 单声道 (320 samples * 2 bytes)
+        // 可以通过 STREAM_BINARY_CHUNK_SIZE 变量配置
+        m_binary_chunk_size = 640;
+        m_binary_buffer_enabled = true;
 
         // Setup eventual TLS options.
         // tls_cafile may hold the special values
@@ -186,7 +193,28 @@ public:
                         "(%s) 🎵 [WebSocket] 二进制消息: %zu bytes\n",
                         m_sessionId.c_str(), message.size());
                 }
-                eventCallback(BINARY_MESSAGE, message.data(), message.size());
+                
+                // 如果启用了缓冲区，累积数据直到达到一定大小
+                if (m_binary_buffer_enabled) {
+                    // 追加到缓冲区
+                    m_binary_buffer.insert(m_binary_buffer.end(), 
+                                          message.begin(), 
+                                          message.end());
+                    
+                    // 当缓冲区达到阈值时，处理数据
+                    while (m_binary_buffer.size() >= m_binary_chunk_size) {
+                        // 提取一个完整的音频块（确保是偶数字节）
+                        size_t process_size = m_binary_chunk_size & ~((size_t)1);
+                        eventCallback(BINARY_MESSAGE, m_binary_buffer.data(), process_size);
+                        
+                        // 从缓冲区移除已处理的数据
+                        m_binary_buffer.erase(m_binary_buffer.begin(), 
+                                             m_binary_buffer.begin() + process_size);
+                    }
+                } else {
+                    // 直接处理（不缓冲）
+                    eventCallback(BINARY_MESSAGE, message.data(), message.size());
+                }
             } else {
                 // 处理为 JSON 文本消息
                 if (!m_suppress_log) {
@@ -360,6 +388,16 @@ public:
             }
         }
         
+        // 日志：显示接收到的原始数据大小
+        static uint64_t binary_msg_count = 0;
+        binary_msg_count++;
+        if (binary_msg_count % 50 == 0 || len < 100) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                "(%s) 接收二进制数据 #%llu: %zu bytes (格式: %s, 采样率: %d Hz)\n",
+                m_sessionId.c_str(), (unsigned long long)binary_msg_count, len,
+                is_big_endian ? "S16BE" : "S16LE", sampleRate);
+        }
+        
         // 计算样本数 (16-bit = 2 bytes per sample)
         size_t input_samples = processed_len / sizeof(int16_t);
         
@@ -457,9 +495,15 @@ public:
                     size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                     double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                     
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                        "(%s) 接收二进制音频: %zu bytes → %zu samples @ %d Hz, 缓冲区: %.2f ms\n",
-                        m_sessionId.c_str(), processed_len, playbackSamples.size(), target_rate, buffer_ms);
+                    // 每 100 次打印一次日志
+                    static uint64_t write_count = 0;
+                    write_count++;
+                    if (write_count % 100 == 0) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                            "(%s) 写入音频 #%llu: %zu bytes → %zu samples @ %d Hz, 缓冲区: %.2f ms\n",
+                            m_sessionId.c_str(), (unsigned long long)write_count,
+                            processed_len, playbackSamples.size(), target_rate, buffer_ms);
+                    }
                 }
             } else {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
@@ -868,7 +912,32 @@ public:
 
     void disconnect() {
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "disconnecting...\n");
+        
+        // 清空二进制缓冲区
+        if (!m_binary_buffer.empty()) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+                "(%s) 断开连接时清空二进制缓冲区: %zu bytes\n",
+                m_sessionId.c_str(), m_binary_buffer.size());
+            m_binary_buffer.clear();
+        }
+        
         client.disconnect();
+    }
+    
+    void setBinaryChunkSize(size_t size) {
+        if (size > 0 && size <= 65536) {
+            m_binary_chunk_size = size & ~((size_t)1);  // 确保是偶数
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                "(%s) 设置二进制块大小: %zu bytes\n",
+                m_sessionId.c_str(), m_binary_chunk_size);
+        }
+    }
+    
+    void setBinaryBufferEnabled(bool enabled) {
+        m_binary_buffer_enabled = enabled;
+        if (!enabled && !m_binary_buffer.empty()) {
+            m_binary_buffer.clear();
+        }
     }
 
     bool isConnected() {
@@ -901,6 +970,11 @@ private:
     const char* m_extra_headers;
     int m_playFile;
     std::unordered_set<std::string> m_Files;
+    
+    // 二进制数据缓冲区（用于累积流式传输的音频片段）
+    std::vector<uint8_t> m_binary_buffer;
+    bool m_binary_buffer_enabled;
+    size_t m_binary_chunk_size = 640;  // 默认 20ms @ 16kHz 单声道 (320 samples * 2 bytes)
 };
 
 
@@ -946,6 +1020,23 @@ namespace {
         auto* as = new AudioStreamer(tech_pvt->sessionId, wsUri, responseHandler, deflate, heart_beat,
                                         suppressLog, extra_headers, no_reconnect,
                                         tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation);
+
+        // 配置二进制数据缓冲区
+        switch_channel_t *channel = switch_core_session_get_channel(session);
+        const char* chunk_size_str = switch_channel_get_variable(channel, "STREAM_BINARY_CHUNK_SIZE");
+        if (chunk_size_str) {
+            int chunk_size = atoi(chunk_size_str);
+            if (chunk_size > 0) {
+                as->setBinaryChunkSize(chunk_size);
+            }
+        }
+        
+        // 可以通过 STREAM_BINARY_BUFFER_DISABLED 变量禁用缓冲
+        if (switch_channel_var_true(channel, "STREAM_BINARY_BUFFER_DISABLED")) {
+            as->setBinaryBufferEnabled(false);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 二进制缓冲区已禁用\n", tech_pvt->sessionId);
+        }
 
         tech_pvt->pAudioStreamer = static_cast<void *>(as);
 
