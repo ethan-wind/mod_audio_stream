@@ -205,7 +205,7 @@ public:
                     while (m_binary_buffer.size() >= m_binary_chunk_size) {
                         // 提取一个完整的音频块（确保是偶数字节）
                         size_t process_size = m_binary_chunk_size & ~((size_t)1);
-                        eventCallback(BINARY_MESSAGE, m_binary_buffer.data(), process_size);
+                        eventCallback(BINARY_MESSAGE, reinterpret_cast<const char*>(m_binary_buffer.data()), process_size);
                         
                         // 从缓冲区移除已处理的数据
                         m_binary_buffer.erase(m_binary_buffer.begin(), 
