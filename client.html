@@ -1,0 +1,243 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Voicebot WebSocket 客户端</title>
+  <style>
+    body { font-family: Arial, sans-serif; max-width: 720px; margin: 24px auto; line-height: 1.6; }
+    h1 { font-size: 20px; margin-bottom: 8px; }
+    .controls { display: flex; gap: 8px; margin: 12px 0; }
+    button { padding: 8px 12px; }
+    #status { padding: 8px; background: #f3f3f3; border: 1px solid #ddd; }
+    #log { height: 200px; overflow: auto; border: 1px solid #ddd; padding: 8px; white-space: pre-wrap; background: #fafafa; }
+  </style>
+</head>
+<body>
+  <h1>Voicebot WS 客户端</h1>
+  <div>
+    WebSocket URL:
+    <input id="wsUrl" size="60" value="ws://localhost:18080/v1/ws">
+  </div>
+  <div class="controls">
+    <button id="connectBtn">连接并开始说话</button>
+    <button id="stopBtn" disabled>停止</button>
+  </div>
+  <div id="status">未连接</div>
+  <div>
+    <strong>ASR 文本：</strong><span id="asrText">-</span>
+  </div>
+  <h3>日志</h3>
+  <div id="log"></div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const asrEl = document.getElementById('asrText');
+    const wsUrlInput = document.getElementById('wsUrl');
+    const connectBtn = document.getElementById('connectBtn');
+    const stopBtn = document.getElementById('stopBtn');
+
+    let ws;
+    let audioCtx;
+    let playbackAudioCtx;  // 用于播放 TTS 音频
+    let mediaStream;
+    let processor;
+    let source;
+    const targetSampleRate = 8000;  // ASR 输入采样率
+    const ttsSampleRate = 8000;     // TTS 输出采样率
+    
+    // 音频播放队列
+    let audioQueue = [];
+    let isPlaying = false;
+    let nextStartTime = 0;
+
+    function log(msg) {
+      const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      logEl.textContent += line;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStatus(text) {
+      statusEl.textContent = text;
+    }
+
+    function downsampleAndEncode(buffer, inputSampleRate) {
+      const sampleRatio = inputSampleRate / targetSampleRate;
+      const outputLength = Math.floor(buffer.length / sampleRatio);
+      const output = new Int16Array(outputLength);
+      for (let i = 0; i < outputLength; i++) {
+        const idx = Math.floor(i * sampleRatio);
+        let s = buffer[idx] || 0;
+        s = Math.max(-1, Math.min(1, s));
+        output[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return output.buffer;
+    }
+
+    function floatToPcmBuffer(int16) {
+      // 使用浏览器默认采样率的 AudioContext
+      if (!playbackAudioCtx) {
+        playbackAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        log(`播放 AudioContext 采样率: ${playbackAudioCtx.sampleRate}Hz`);
+        nextStartTime = playbackAudioCtx.currentTime;
+      }
+      
+      // 创建 AudioBuffer，指定原始采样率为 ttsSampleRate
+      // 浏览器会自动进行重采样
+      const audioBuffer = playbackAudioCtx.createBuffer(1, int16.length, ttsSampleRate);
+      const channelData = audioBuffer.getChannelData(0);
+      for (let i = 0; i < int16.length; i++) {
+        channelData[i] = int16[i] / 0x8000;
+      }
+      
+      // 添加到队列
+      audioQueue.push(audioBuffer);
+      log(`音频加入队列: ${int16.length} 样本, 队列长度: ${audioQueue.length}`);
+      
+      // 如果没有正在播放，开始播放
+      if (!isPlaying) {
+        playNextAudio();
+      }
+    }
+    
+    function playNextAudio() {
+      if (audioQueue.length === 0) {
+        isPlaying = false;
+        log('音频队列播放完成');
+        return;
+      }
+      
+      isPlaying = true;
+      const audioBuffer = audioQueue.shift();
+      
+      // 计算开始时间
+      const currentTime = playbackAudioCtx.currentTime;
+      const startTime = Math.max(currentTime, nextStartTime);
+      
+      // 创建音频源
+      const src = playbackAudioCtx.createBufferSource();
+      src.buffer = audioBuffer;
+      src.connect(playbackAudioCtx.destination);
+      
+      // 设置结束回调
+      src.onended = () => {
+        log(`音频片段播放完成，剩余队列: ${audioQueue.length}`);
+        playNextAudio();
+      };
+      
+      // 开始播放
+      src.start(startTime);
+      
+      // 更新下次开始时间
+      nextStartTime = startTime + audioBuffer.duration;
+      
+      log(`播放音频: ${audioBuffer.length} 样本, 时长: ${audioBuffer.duration.toFixed(2)}s, 开始时间: ${startTime.toFixed(2)}s`);
+    }
+
+    async function startCapture() {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      source = audioCtx.createMediaStreamSource(mediaStream);
+      processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const input = e.inputBuffer.getChannelData(0);
+        const buffer = downsampleAndEncode(input, audioCtx.sampleRate);
+        ws.send(buffer);
+      };
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+    }
+
+    function stopCapture() {
+      if (processor) {
+        processor.disconnect();
+        processor.onaudioprocess = null;
+        processor = null;
+      }
+      if (source) {
+        source.disconnect();
+        source = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+        mediaStream = null;
+      }
+      if (audioCtx) {
+        audioCtx.close();
+        audioCtx = null;
+      }
+      if (playbackAudioCtx) {
+        playbackAudioCtx.close();
+        playbackAudioCtx = null;
+      }
+      // 清空音频队列
+      audioQueue = [];
+      isPlaying = false;
+      nextStartTime = 0;
+    }
+
+    function setupWebSocket(url) {
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        setStatus('已连接，开始录音发送...');
+        log('WebSocket 已连接');
+        stopBtn.disabled = false;
+        connectBtn.disabled = true;
+        startCapture().catch(err => {
+          log('获取麦克风失败: ' + err);
+          setStatus('录音失败');
+        });
+      };
+
+      ws.onmessage = (event) => {
+        if (typeof event.data === 'string') {
+          log('收到文本: ' + event.data);
+          asrEl.textContent = event.data;
+          return;
+        }
+        // 收到二进制音频数据（TTS 返回的 PCM）
+        const data = new Int16Array(event.data);
+        if (data.length === 0) {
+          log('收到空音频数据');
+          return;
+        }
+        log(`收到音频数据: ${data.length} 样本`);
+        floatToPcmBuffer(data);
+      };
+
+      ws.onerror = (err) => {
+        log('WebSocket 错误: ' + err.message);
+        setStatus('连接错误');
+      };
+
+      ws.onclose = () => {
+        log('WebSocket 已关闭');
+        setStatus('连接已关闭');
+        stopBtn.disabled = true;
+        connectBtn.disabled = false;
+        stopCapture();
+      };
+    }
+
+    connectBtn.onclick = () => {
+      const url = wsUrlInput.value.trim();
+      if (!url) {
+        alert('请输入 WebSocket URL');
+        return;
+      }
+      setupWebSocket(url);
+    };
+
+    stopBtn.onclick = () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send('stop');
+        ws.close();
+      }
+      stopCapture();
+    };
+  </script>
+</body>
+</html>

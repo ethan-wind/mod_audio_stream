@@ -153,7 +153,7 @@ public:
             client.setHeaders(hdrs);
 
         // Setup a callback to be fired when a message or an event (open, close, error) is received
-        // 支持文本消息（JSON）和二进制消息（原始音频流）
+        // 只处理二进制消息（原始音频流）
         // 注意：std::string 可以安全存储二进制数据（包括 \0 字节）
         // 使用 message.data() 和 message.size() 来访问完整的二进制内容
         client.setMessageCallback([this](const std::string& message) {
@@ -163,66 +163,34 @@ public:
                 return;
             }
             
-            // 消息类型判断：区分 JSON 文本和二进制音频
-            bool is_binary = false;
-            
-            // 检查是否为有效的 JSON 格式
-            // JSON 必须以 '{' 或 '[' 开头（忽略前导空白）
-            size_t first_char_pos = 0;
-            while (first_char_pos < message.size() && 
-                   (message[first_char_pos] == ' ' || 
-                    message[first_char_pos] == '\t' || 
-                    message[first_char_pos] == '\n' || 
-                    message[first_char_pos] == '\r')) {
-                first_char_pos++;
+            // 所有消息都当作二进制音频数据处理
+            // 使用 message.data() 而不是 message.c_str() 来确保获取完整的二进制数据
+            if (!m_suppress_log) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+                    "(%s) 🎵 [WebSocket] 二进制消息: %zu bytes\n",
+                    m_sessionId.c_str(), message.size());
             }
             
-            if (first_char_pos < message.size()) {
-                char first_char = message[first_char_pos];
-                // JSON 必须以 '{' 或 '[' 开头；其他全部当作二进制
-                if (first_char != '{' && first_char != '[') {
-                    is_binary = true;
-                }
-            }
-            
-            if (is_binary) {
-                // 处理为二进制音频数据
-                // 使用 message.data() 而不是 message.c_str() 来确保获取完整的二进制数据
-                if (!m_suppress_log) {
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-                        "(%s) 🎵 [WebSocket] 二进制消息: %zu bytes\n",
-                        m_sessionId.c_str(), message.size());
-                }
+            // 如果启用了缓冲区，累积数据直到达到一定大小
+            if (m_binary_buffer_enabled) {
+                // 追加到缓冲区
+                m_binary_buffer.insert(m_binary_buffer.end(), 
+                                      message.begin(), 
+                                      message.end());
                 
-                // 如果启用了缓冲区，累积数据直到达到一定大小
-                if (m_binary_buffer_enabled) {
-                    // 追加到缓冲区
-                    m_binary_buffer.insert(m_binary_buffer.end(), 
-                                          message.begin(), 
-                                          message.end());
+                // 当缓冲区达到阈值时，处理数据
+                while (m_binary_buffer.size() >= m_binary_chunk_size) {
+                    // 提取一个完整的音频块（确保是偶数字节）
+                    size_t process_size = m_binary_chunk_size & ~((size_t)1);
+                    eventCallback(BINARY_MESSAGE, reinterpret_cast<const char*>(m_binary_buffer.data()), process_size);
                     
-                    // 当缓冲区达到阈值时，处理数据
-                    while (m_binary_buffer.size() >= m_binary_chunk_size) {
-                        // 提取一个完整的音频块（确保是偶数字节）
-                        size_t process_size = m_binary_chunk_size & ~((size_t)1);
-                        eventCallback(BINARY_MESSAGE, reinterpret_cast<const char*>(m_binary_buffer.data()), process_size);
-                        
-                        // 从缓冲区移除已处理的数据
-                        m_binary_buffer.erase(m_binary_buffer.begin(), 
-                                             m_binary_buffer.begin() + process_size);
-                    }
-                } else {
-                    // 直接处理（不缓冲）
-                    eventCallback(BINARY_MESSAGE, message.data(), message.size());
+                    // 从缓冲区移除已处理的数据
+                    m_binary_buffer.erase(m_binary_buffer.begin(), 
+                                         m_binary_buffer.begin() + process_size);
                 }
             } else {
-                // 处理为 JSON 文本消息
-                if (!m_suppress_log) {
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-                        "(%s) 📄 [WebSocket] JSON消息: %zu bytes\n",
-                        m_sessionId.c_str(), message.size());
-                }
-                eventCallback(MESSAGE, message.c_str(), 0);
+                // 直接处理（不缓冲）
+                eventCallback(BINARY_MESSAGE, message.data(), message.size());
             }
         });
 
