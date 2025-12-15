@@ -149,6 +149,8 @@ public:
         // 支持文本消息（JSON）和二进制消息（原始 PCM S16BE）
         client.setMessageCallback([this](const std::string& message) {
             if (message.empty()) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "(%s) 收到空消息\n", m_sessionId.c_str());
                 return;
             }
             
@@ -176,9 +178,15 @@ public:
             
             if (is_binary) {
                 // 处理为二进制音频数据
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                    "(%s) 收到二进制消息: %zu bytes, 首字节=0x%02X\n",
+                    m_sessionId.c_str(), message.size(), (uint8_t)message[0]);
                 eventCallback(BINARY_MESSAGE, message.c_str(), message.size());
             } else {
                 // 处理为 JSON 文本消息
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                    "(%s) 收到JSON消息: %zu bytes\n",
+                    m_sessionId.c_str(), message.size());
                 eventCallback(MESSAGE, message.c_str(), 0);
             }
         });
@@ -265,6 +273,8 @@ public:
         if(psession) {
             switch (event) {
                 case CONNECT_SUCCESS:
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                        "(%s) WebSocket 连接成功\n", m_sessionId.c_str());
                     send_initial_metadata(psession);
                     m_notify(psession, EVENT_CONNECT, message);
                     break;
@@ -281,6 +291,8 @@ public:
                     break;
                 case MESSAGE: {
                     std::string msg(message);
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                        "(%s) 处理JSON消息\n", m_sessionId.c_str());
                     if(processMessage(psession, msg) != SWITCH_TRUE) {
                         m_notify(psession, EVENT_JSON, msg.c_str());
                     }
@@ -290,17 +302,27 @@ public:
                 }
                 case BINARY_MESSAGE: {
                     // 处理原始 PCM S16BE 二进制数据流
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                        "(%s) 处理二进制音频: %zu bytes\n", m_sessionId.c_str(), len);
                     processBinaryAudio(psession, (const uint8_t*)message, len);
                     break;
                 }
             }
             switch_core_session_rwunlock(psession);
+        } else {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "(%s) eventCallback: 无法定位会话\n", m_sessionId.c_str());
         }
     }
 
     // 处理原始 PCM S16BE 二进制音频流
     void processBinaryAudio(switch_core_session_t* session, const uint8_t* data, size_t len) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            "(%s) processBinaryAudio 开始: len=%zu\n", m_sessionId.c_str(), len);
+        
         if (!data || len == 0) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                "(%s) processBinaryAudio: 数据为空\n", m_sessionId.c_str());
             return;
         }
         size_t processed_len = len & ~((size_t)1);  // 必须是偶数字节，代表完整的 16-bit 样本
@@ -310,6 +332,8 @@ public:
                 m_sessionId.c_str(), len, processed_len);
         }
         if (processed_len == 0) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                "(%s) processBinaryAudio: 处理长度为0\n", m_sessionId.c_str());
             return;
         }
         
@@ -338,12 +362,34 @@ public:
         private_t *tech_pvt = nullptr;
         if (bug) {
             tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 获取到 media bug 和 tech_pvt\n", m_sessionId.c_str());
+        } else {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                "(%s) 无法获取 media bug\n", m_sessionId.c_str());
         }
         
         // 步骤 2: 重采样到通话采样率并写入播放缓冲区
         if (tech_pvt && tech_pvt->stream_play_enabled) {
             int target_rate = tech_pvt->sampling;      // 通话采样率 (8000/16000 Hz)
             int target_channels = tech_pvt->channels;  // 通话声道数 (通常为1)
+            
+            // 检查输入音频的采样值范围
+            int16_t min_input = 0, max_input = 0;
+            if (input_samples > 0) {
+                min_input = max_input = pcm16bit[0];
+                for (size_t i = 1; i < input_samples; i++) {
+                    if (pcm16bit[i] < min_input) min_input = pcm16bit[i];
+                    if (pcm16bit[i] > max_input) max_input = pcm16bit[i];
+                }
+            }
+            
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 🎵 [二进制音频] 准备重采样: %d Hz → %d Hz, channels=%d, stream_play_enabled=%d\n",
+                m_sessionId.c_str(), sampleRate, target_rate, target_channels, tech_pvt->stream_play_enabled);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 🎵 [二进制音频] 输入音频: %zu samples, 采样值范围 [%d, %d]\n",
+                m_sessionId.c_str(), input_samples, min_input, max_input);
             
             std::vector<int16_t> playbackSamples;
             
@@ -365,6 +411,10 @@ public:
                     spx_uint32_t in_len = input_samples;
                     spx_uint32_t out_len = output_samples;
                     
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                        "(%s) 🔄 [重采样] 开始: in_len=%u, out_len=%u (预期)\n",
+                        m_sessionId.c_str(), in_len, out_len);
+                    
                     int resample_err = speex_resampler_process_int(resampler, 0,
                                                 pcm16bit.data(),
                                                 &in_len,
@@ -373,8 +423,21 @@ public:
                     
                     if (resample_err != 0) {
                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                            "(%s) 重采样处理失败: %s\n",
+                            "(%s) ❌ [重采样] 失败: %s\n",
                             m_sessionId.c_str(), speex_resampler_strerror(resample_err));
+                    } else {
+                        // 检查重采样后的采样值范围
+                        int16_t min_out = 0, max_out = 0;
+                        if (out_len > 0) {
+                            min_out = max_out = playbackSamples[0];
+                            for (spx_uint32_t i = 1; i < out_len; i++) {
+                                if (playbackSamples[i] < min_out) min_out = playbackSamples[i];
+                                if (playbackSamples[i] > max_out) max_out = playbackSamples[i];
+                            }
+                        }
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                            "(%s) ✅ [重采样] 完成: out_len=%u, 采样值范围 [%d, %d]\n",
+                            m_sessionId.c_str(), out_len, min_out, max_out);
                     }
                     
                     playbackSamples.resize(out_len);
@@ -394,6 +457,12 @@ public:
             switch_mutex_lock(tech_pvt->play_mutex);
             size_t data_size = playbackSamples.size() * sizeof(int16_t);
             size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
+            size_t buffer_inuse_before = switch_buffer_inuse(tech_pvt->play_buffer);
+            double buffer_ms_before = (double)buffer_inuse_before / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+            
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 📝 [写入缓冲区] 准备写入: data_size=%zu bytes (%zu samples), available=%zu bytes, 当前缓冲区: %.2f ms\n",
+                m_sessionId.c_str(), data_size, playbackSamples.size(), available, buffer_ms_before);
             
             if (available >= data_size) {
                 size_t written = switch_buffer_write(tech_pvt->play_buffer,
@@ -403,17 +472,22 @@ public:
                 size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                 
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                    "(%s) 接收二进制音频: %zu bytes → %zu samples @ %d Hz | 缓冲区: %.2f ms\n",
-                    m_sessionId.c_str(), processed_len, playbackSamples.size(), target_rate, buffer_ms);
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                    "(%s) ✅ [写入缓冲区] 成功: 写入=%zu bytes, 缓冲区: %.2f ms → %.2f ms (+%.2f ms)\n",
+                    m_sessionId.c_str(), written, buffer_ms_before, buffer_ms, buffer_ms - buffer_ms_before);
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                    "(%s) ✓ 接收二进制音频: %zu bytes → %zu samples @ %d Hz\n",
+                    m_sessionId.c_str(), processed_len, playbackSamples.size(), target_rate);
             } else {
-                size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
-                double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                    "(%s) 播放缓冲区已满 (%.2f ms)，丢弃 %zu samples\n",
-                    m_sessionId.c_str(), buffer_ms, playbackSamples.size());
+                    "(%s) ❌ [写入缓冲区] 已满: 缓冲区 %.2f ms，丢弃 %zu samples\n",
+                    m_sessionId.c_str(), buffer_ms_before, playbackSamples.size());
             }
             switch_mutex_unlock(tech_pvt->play_mutex);
+        } else {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                "(%s) 无法写入播放缓冲区: tech_pvt=%p, stream_play_enabled=%d\n",
+                m_sessionId.c_str(), tech_pvt, tech_pvt ? tech_pvt->stream_play_enabled : -1);
         }
         
         // 步骤 4: 可选 - 保存为文件用于调试
@@ -424,9 +498,14 @@ public:
         cJSON* json = cJSON_Parse(message.c_str());
         switch_bool_t status = SWITCH_FALSE;
         if (!json) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                "(%s) processMessage: JSON 解析失败\n", m_sessionId.c_str());
             return status;
         }
         const char* jsType = cJSON_GetObjectCstr(json, "type");
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            "(%s) processMessage: type=%s\n", m_sessionId.c_str(), jsType ? jsType : "NULL");
+        
         if(jsType && strcmp(jsType, "streamAudio") == 0) {
             cJSON* jsonData = cJSON_GetObjectItem(json, "data");
             if(jsonData) {
@@ -531,6 +610,11 @@ public:
                         private_t *tech_pvt = nullptr;
                         if (bug) {
                             tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                "(%s) processMessage: 获取到 media bug 和 tech_pvt\n", m_sessionId.c_str());
+                        } else {
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                "(%s) processMessage: 无法获取 media bug\n", m_sessionId.c_str());
                         }
                         
                         // ========== 步骤 2: 重采样到通话采样率 ==========
@@ -553,7 +637,7 @@ public:
                             int target_channels = tech_pvt->channels;  // 通话声道数 (通常为1)
                             
                             std::vector<int16_t> playbackSamples;
-                            
+                        
                             // 使用 SpeexDSP 重采样器进行高质量重采样
                             if (sampleRate != target_rate) {
                                 int err;
@@ -573,6 +657,10 @@ public:
                                     spx_uint32_t in_len = input_samples;
                                     spx_uint32_t out_len = output_samples;
                                     
+                                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                        "(%s) 🔄 [重采样] 开始: in_len=%u, out_len=%u (预期)\n",
+                                        m_sessionId.c_str(), in_len, out_len);
+                                    
                                     int resample_err = speex_resampler_process_int(resampler, 0,
                                                                 pcm16bit.data(),
                                                                 &in_len,
@@ -581,34 +669,37 @@ public:
                                     
                                     if (resample_err != 0) {
                                         switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                            "(%s) 重采样处理失败: %s\n",
+                                            "(%s) ❌ [重采样] 失败: %s\n",
                                             m_sessionId.c_str(), speex_resampler_strerror(resample_err));
+                                    } else {
+                                        // 检查重采样后的采样值范围
+                                        int16_t min_out = 0, max_out = 0;
+                                        if (out_len > 0) {
+                                            min_out = max_out = playbackSamples[0];
+                                            for (spx_uint32_t i = 1; i < out_len; i++) {
+                                                if (playbackSamples[i] < min_out) min_out = playbackSamples[i];
+                                                if (playbackSamples[i] > max_out) max_out = playbackSamples[i];
+                                            }
+                                        }
+                                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                            "(%s) ✅ [重采样] 完成: out_len=%u, 采样值范围 [%d, %d]\n",
+                                            m_sessionId.c_str(), out_len, min_out, max_out);
                                     }
                                     
                                     playbackSamples.resize(out_len);
                                     speex_resampler_destroy(resampler);
                                     
-                                    // 检查重采样后的样本
-                                    int16_t min_pcm = 0, max_pcm = 0;
-                                    if (out_len > 0) {
-                                        min_pcm = max_pcm = playbackSamples[0];
-                                        for (spx_uint32_t i = 1; i < out_len; i++) {
-                                            if (playbackSamples[i] < min_pcm) min_pcm = playbackSamples[i];
-                                            if (playbackSamples[i] > max_pcm) max_pcm = playbackSamples[i];
-                                        }
-                                    }
-                                    
                                 } else {
                                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                                        "(%s) 重采样器初始化失败: %s\n",
+                                        "(%s) ❌ [重采样] 初始化失败: %s\n",
                                         m_sessionId.c_str(), speex_resampler_strerror(err));
                                     playbackSamples = pcm16bit;
                                 }
                             } else {
                                 // 采样率已匹配，无需重采样
                                 playbackSamples = pcm16bit;
-                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                                    "(%s) 无需重采样: %d Hz\n",
+                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                    "(%s) ✅ [重采样] 跳过: 采样率已匹配 %d Hz\n",
                                     m_sessionId.c_str(), sampleRate);
                             }
                             
@@ -624,6 +715,12 @@ public:
                             switch_mutex_lock(tech_pvt->play_mutex);
                             size_t data_size = playbackSamples.size() * sizeof(int16_t);
                             size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
+                            size_t buffer_inuse_before = switch_buffer_inuse(tech_pvt->play_buffer);
+                            double buffer_ms_before = (double)buffer_inuse_before / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+                            
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                "(%s) 📝 [写入缓冲区] 准备写入: data_size=%zu bytes (%zu samples), available=%zu bytes, 当前缓冲区: %.2f ms\n",
+                                m_sessionId.c_str(), data_size, playbackSamples.size(), available, buffer_ms_before);
                             
                             if (available >= data_size) {
                                 // 写入 16-bit Linear PCM 数据到播放缓冲区
@@ -635,12 +732,13 @@ public:
                                 size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                                 
+                                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                    "(%s) ✅ [写入缓冲区] 成功: 写入=%zu bytes, 缓冲区: %.2f ms → %.2f ms (+%.2f ms)\n",
+                                    m_sessionId.c_str(), written, buffer_ms_before, buffer_ms, buffer_ms - buffer_ms_before);
                             } else {
-                                size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
-                                double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                                    "(%s) 播放缓冲区已满 (%.2f ms)，丢弃 %zu samples\n",
-                                    m_sessionId.c_str(), buffer_ms, playbackSamples.size());
+                                    "(%s) ❌ [写入缓冲区] 已满: 缓冲区 %.2f ms，丢弃 %zu samples\n",
+                                    m_sessionId.c_str(), buffer_ms_before, playbackSamples.size());
                             }
                             switch_mutex_unlock(tech_pvt->play_mutex);
                         }
@@ -888,12 +986,22 @@ namespace {
             return SWITCH_STATUS_FALSE;
         }
         
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            "(%s) ✅ [初始化] 播放缓冲区创建成功: %zu bytes (%.2f 秒 @ %u Hz)\n",
+            tech_pvt->sessionId, play_buflen,
+            (double)play_buflen / (sampling * channels * sizeof(int16_t)),
+            sampling);
+        
         // 初始化播放互斥锁
         switch_mutex_init(&tech_pvt->play_mutex, SWITCH_MUTEX_NESTED, pool);
         
         // 默认启用流式播放
         tech_pvt->stream_play_enabled = 1;
         tech_pvt->play_thread_running = 0;
+        
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            "(%s) ✅ [初始化] 流式播放已启用: stream_play_enabled=%d\n",
+            tech_pvt->sessionId, tech_pvt->stream_play_enabled);
 
         tech_pvt->write_frame_data = (uint8_t*)switch_core_session_alloc(session, SWITCH_RECOMMENDED_BUFFER_SIZE);
         if (!tech_pvt->write_frame_data) {
@@ -1024,9 +1132,12 @@ extern "C" {
         }
 
         bool injected = false;
+        static uint64_t frame_counter = 0;
+        frame_counter++;
 
         switch_mutex_lock(tech_pvt->play_mutex);
         size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+        double buffer_ms = (double)inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
 
         if (inuse > 0) {
             size_t read_size = target_bytes;
@@ -1037,6 +1148,18 @@ extern "C" {
             // 从缓冲区读取 16-bit Linear PCM 数据 (小端序)
             switch_buffer_read(tech_pvt->play_buffer, out_frame->data, read_size);
             injected = true;
+
+            // 检查读取的音频数据采样值范围
+            int16_t* samples = (int16_t*)out_frame->data;
+            size_t sample_count = read_size / sizeof(int16_t);
+            int16_t min_sample = 0, max_sample = 0;
+            if (sample_count > 0) {
+                min_sample = max_sample = samples[0];
+                for (size_t i = 1; i < sample_count; i++) {
+                    if (samples[i] < min_sample) min_sample = samples[i];
+                    if (samples[i] > max_sample) max_sample = samples[i];
+                }
+            }
 
             // 如果数据不足一帧，用静音填充 (0x0000 = 静音)
             if (read_size < target_bytes) {
@@ -1049,13 +1172,26 @@ extern "C" {
             out_frame->rate = tech_pvt->sampling;        // 通话采样率
             out_frame->channels = tech_pvt->channels;    // 通话声道数
 
-            // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-            //                   "(%s) 注入音频: %u samples @ %d Hz | 缓冲区剩余: %.2f ms\n",
-            //                   tech_pvt->sessionId,
-            //                  out_frame->samples,
-            //                  out_frame->rate,
-            //                  (double)switch_buffer_inuse(tech_pvt->play_buffer) /
-            //                  (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0);
+            size_t buffer_remaining = switch_buffer_inuse(tech_pvt->play_buffer);
+            double buffer_remaining_ms = (double)buffer_remaining / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+            
+            // 每50帧（约1秒）打印一次详细日志
+            if (frame_counter % 50 == 0) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) 🔊 [播放音频] 帧#%llu: 读取=%zu bytes (%zu samples), 采样值范围 [%d, %d], 缓冲区: %.2f ms → %.2f ms\n",
+                                  tech_pvt->sessionId,
+                                  (unsigned long long)frame_counter,
+                                  read_size, sample_count, min_sample, max_sample,
+                                  buffer_ms, buffer_remaining_ms);
+            }
+        } else {
+            // 每100帧打印一次缓冲区为空的日志
+            if (frame_counter % 100 == 0) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                  "(%s) 🔇 [播放音频] 帧#%llu: 缓冲区为空，保持原始音频透传\n",
+                                  tech_pvt->sessionId,
+                                  (unsigned long long)frame_counter);
+            }
         }
         switch_mutex_unlock(tech_pvt->play_mutex);
 

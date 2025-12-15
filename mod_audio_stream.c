@@ -58,6 +58,14 @@ static switch_bool_t capture_callback(switch_media_bug_t *bug, void *user_data, 
             /* 下行：将 TTS 音频播放给线路 */
             if (tech_pvt->stream_play_enabled) {
                 stream_play_frame(bug, tech_pvt);
+            } else {
+                static uint64_t disabled_counter = 0;
+                disabled_counter++;
+                if (disabled_counter % 100 == 0) {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                                      "(%s) ⚠️ [WRITE_REPLACE] stream_play_enabled=0, 跳过播放 (计数: %llu)\n",
+                                      tech_pvt->sessionId, (unsigned long long)disabled_counter);
+                }
             }
             return SWITCH_TRUE;
             break;
