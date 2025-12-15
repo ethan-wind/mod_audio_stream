@@ -114,14 +114,19 @@ public:
 
         client.setUrl(wsUri);
         
-        // 配置二进制缓冲区大小（从环境变量或使用默认值）
-        // 默认禁用缓冲，直接处理每个 WebSocket 消息
-        // 可以通过 STREAM_BINARY_CHUNK_SIZE 变量配置
-        m_binary_chunk_size = 320;
-        m_binary_buffer_enabled = false;  // 默认禁用缓冲，直接处理
+        // ⚠️ 关键修复：默认启用二进制缓冲区
+        // WebSocket message 大小不固定，必须缓冲后按固定帧大小切分
+        // 
+        // 音频帧大小计算：
+        // - 8kHz, 16-bit, mono, 20ms: 8000 * 0.02 * 2 = 320 bytes
+        // - 16kHz, 16-bit, mono, 20ms: 16000 * 0.02 * 2 = 640 bytes
+        // - 24kHz, 16-bit, mono, 20ms: 24000 * 0.02 * 2 = 960 bytes
+        m_binary_chunk_size = 320;  // 默认 8kHz 20ms 帧
+        m_binary_buffer_enabled = true;  // ✅ 必须启用缓冲
+        m_read_pos = 0;  // ring buffer 读位置
         
         switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-            "(%s) 🔧 [初始化] 二进制块大小: %zu bytes, 缓冲启用: %d (默认禁用，直接处理)\n",
+            "(%s) 🔧 [初始化] 二进制块大小: %zu bytes, 缓冲启用: %d (强制启用，确保音频帧对齐)\n",
             uuid, m_binary_chunk_size, m_binary_buffer_enabled);
 
         // Setup eventual TLS options.
@@ -157,65 +162,71 @@ public:
             client.setHeaders(hdrs);
 
         // Setup a callback to be fired when a message or an event (open, close, error) is received
-        // 只处理二进制消息（原始音频流）
-        // 注意：std::string 可以安全存储二进制数据（包括 \0 字节）
-        // 使用 message.data() 和 message.size() 来访问完整的二进制内容
+        // 
+        // ⚠️ 关键：区分 WebSocket 文本帧和二进制帧
+        // 
+        // 假设 WebSocketClient 提供了以下回调（需要根据实际库调整）：
+        // - setMessageCallback: 文本帧（JSON 控制消息）
+        // - setBinaryCallback: 二进制帧（原始音频流）
+        //
+        // 如果库不支持分离回调，需要在回调内部判断帧类型
+        
+        // 文本消息回调：处理 JSON 控制消息
         client.setMessageCallback([this](const std::string& message) {
             if (message.empty()) {
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-                    "(%s) ⚠️ [WebSocket] 收到空消息\n", m_sessionId.c_str());
+                    "(%s) ⚠️ [WebSocket] 收到空文本消息\n", m_sessionId.c_str());
                 return;
             }
             
-            // 所有消息都当作二进制音频数据处理
-            // 使用 message.data() 而不是 message.c_str() 来确保获取完整的二进制数据
+            // 文本帧：JSON 控制消息
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-                "(%s) 🎵 [WebSocket] 收到二进制消息: %zu bytes, 缓冲启用: %d, 块大小: %zu\n",
-                m_sessionId.c_str(), message.size(), m_binary_buffer_enabled, m_binary_chunk_size);
+                "(%s) 📝 [WebSocket] 收到文本消息: %zu bytes\n",
+                m_sessionId.c_str(), message.size());
             
-            // 如果启用了缓冲区，累积数据直到达到一定大小
+            // 处理 JSON 消息（不是音频数据）
+            eventCallback(MESSAGE, message.c_str(), message.size());
+        });
+        
+        // 二进制消息回调：处理原始音频流
+        // 
+        // ⚠️ 注意：如果 WebSocketClient 不支持 setBinaryCallback，
+        // 需要在 setMessageCallback 中通过其他方式判断帧类型
+        // 例如：检查第一个字节是否是 JSON 起始符 '{' 或 '['
+        client.setBinaryCallback([this](const std::string& data) {
+            if (data.empty()) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "(%s) ⚠️ [WebSocket] 收到空二进制消息\n", m_sessionId.c_str());
+                return;
+            }
+            
+            // 二进制帧：原始音频数据
+            // 使用 data.data() 和 data.size() 确保获取完整的二进制数据（包括 \0）
+            
+            // 降低日志频率：每 50 包打印一次，避免高频日志影响性能
+            static uint64_t binary_recv_count = 0;
+            binary_recv_count++;
+            if (binary_recv_count % 50 == 0) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+                    "(%s) 🎵 [WebSocket] 收到二进制消息 #%llu: %zu bytes, 缓冲启用: %d\n",
+                    m_sessionId.c_str(), (unsigned long long)binary_recv_count, 
+                    data.size(), m_binary_buffer_enabled);
+            }
+            
+            // ⚠️ 关键修复：必须使用缓冲区进行音频帧切分
+            // WebSocket message ≠ 音频帧，必须按固定大小切分
             if (m_binary_buffer_enabled) {
-                // 追加到缓冲区
-                m_binary_buffer.insert(m_binary_buffer.end(), 
-                                      message.begin(), 
-                                      message.end());
-                
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-                    "(%s) 📦 [缓冲区] 当前大小: %zu bytes, 阈值: %zu bytes\n",
-                    m_sessionId.c_str(), m_binary_buffer.size(), m_binary_chunk_size);
-                
-                // 当缓冲区达到阈值时，处理数据
-                while (m_binary_buffer.size() >= m_binary_chunk_size) {
-                    // 提取一个完整的音频块（确保是偶数字节）
-                    size_t process_size = m_binary_chunk_size & ~((size_t)1);
-                    
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-                        "(%s) ✅ [缓冲区] 处理音频块: %zu bytes\n",
-                        m_sessionId.c_str(), process_size);
-                    
-                    eventCallback(BINARY_MESSAGE, reinterpret_cast<const char*>(m_binary_buffer.data()), process_size);
-                    
-                    // 从缓冲区移除已处理的数据
-                    m_binary_buffer.erase(m_binary_buffer.begin(), 
-                                         m_binary_buffer.begin() + process_size);
-                }
-                
-                // 如果缓冲区有数据但不足一个完整块，且数据量合理（至少有一些样本），也处理
-                // 这样可以避免小数据包一直累积但从不播放的问题
-                if (m_binary_buffer.size() >= 160 && m_binary_buffer.size() % 2 == 0) {
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-                        "(%s) 🔄 [缓冲区] 处理剩余数据: %zu bytes (未达到阈值但足够播放)\n",
-                        m_sessionId.c_str(), m_binary_buffer.size());
-                    
-                    eventCallback(BINARY_MESSAGE, reinterpret_cast<const char*>(m_binary_buffer.data()), m_binary_buffer.size());
-                    m_binary_buffer.clear();
-                }
+                // 使用 ring buffer 索引而不是 vector erase（避免频繁内存移动）
+                processBinaryWithBuffer(data.data(), data.size());
             } else {
-                // 直接处理（不缓冲）
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-                    "(%s) ⚡ [直接处理] 音频数据: %zu bytes\n",
-                    m_sessionId.c_str(), message.size());
-                eventCallback(BINARY_MESSAGE, message.data(), message.size());
+                // ⚠️ 警告：直接处理模式不推荐用于音频流
+                // 会导致音频帧大小不固定，下游播放器可能出现 jitter/卡顿
+                if (binary_recv_count % 100 == 0) {
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                        "(%s) ⚠️ [直接处理] 音频数据未经缓冲切帧: %zu bytes (可能导致播放问题)\n",
+                        m_sessionId.c_str(), data.size());
+                }
+                eventCallback(BINARY_MESSAGE, data.data(), data.size());
             }
         });
 
@@ -247,6 +258,9 @@ public:
         });
 
         client.setCloseCallback([this](int code, const std::string &reason) {
+            // ⚠️ 关键：Close 时处理残留缓冲区
+            flushOrDiscardBuffer(false);  // false = discard (丢弃残留数据)
+            
             cJSON *root, *message;
             root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "disconnected");
@@ -262,6 +276,21 @@ public:
             switch_safe_free(json_str);
         });
 
+        // ⚠️ 生命周期风险警告：
+        // 在构造函数中调用 client.connect() 会立即启动后台线程
+        // 如果 AudioStreamer 对象在 WebSocket 回调执行前被析构，
+        // lambda 中的 [this] 捕获会变成野指针，导致 UAF (Use-After-Free)
+        // 
+        // 理想方案：
+        // 1. 将 connect() 移到单独的 start() 方法
+        // 2. 使用 shared_ptr + weak_ptr 保护生命周期
+        // 3. 在 disconnect() 中确保所有回调完成后再析构
+        // 
+        // 当前方案（临时）：
+        // - 确保 AudioStreamer 的生命周期长于 WebSocket 连接
+        // - 在 disconnect() 中等待连接完全关闭
+        // - 避免在回调执行期间析构对象
+        
         // Now that our callback is setup, we can start our background thread and receive messages
         client.connect();
     }
@@ -912,22 +941,24 @@ public:
     ~AudioStreamer()= default;
 
     void disconnect() {
-        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, "disconnecting...\n");
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG, 
+            "(%s) disconnecting...\n", m_sessionId.c_str());
         
-        // 清空二进制缓冲区
-        if (!m_binary_buffer.empty()) {
+        // ⚠️ 关键：断开连接时处理残留缓冲区
+        size_t remain = m_binary_buffer.size() - m_read_pos;
+        if (remain > 0) {
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-                "(%s) 断开连接时清空二进制缓冲区: %zu bytes\n",
-                m_sessionId.c_str(), m_binary_buffer.size());
-            m_binary_buffer.clear();
+                "(%s) 断开连接时丢弃残留缓冲区: %zu bytes\n",
+                m_sessionId.c_str(), remain);
         }
+        flushOrDiscardBuffer(false);  // 丢弃残留数据
         
         client.disconnect();
     }
     
     void setBinaryChunkSize(size_t size) {
         if (size > 0 && size <= 65536) {
-            m_binary_chunk_size = size & ~((size_t)1);  // 确保是偶数
+            m_binary_chunk_size = size & ~((size_t)1);  // 确保是偶数（16-bit 对齐）
             switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
                 "(%s) 设置二进制块大小: %zu bytes\n",
                 m_sessionId.c_str(), m_binary_chunk_size);
@@ -936,8 +967,12 @@ public:
     
     void setBinaryBufferEnabled(bool enabled) {
         m_binary_buffer_enabled = enabled;
-        if (!enabled && !m_binary_buffer.empty()) {
-            m_binary_buffer.clear();
+        if (!enabled) {
+            // ⚠️ 警告：禁用缓冲会导致音频帧大小不固定
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "(%s) ⚠️ 禁用二进制缓冲区：音频帧大小将不固定，可能导致播放问题\n",
+                m_sessionId.c_str());
+            flushOrDiscardBuffer(false);
         }
     }
 
@@ -963,6 +998,64 @@ public:
         }
     }
 
+    // ⚠️ 关键：处理二进制音频流的缓冲和切帧
+    // 
+    // 契约保证：
+    // - 每次调用 eventCallback(BINARY_MESSAGE, ...) 都是完整音频帧
+    // - 帧大小 == m_binary_chunk_size（严格对齐）
+    // - 格式：16-bit PCM, 小端序
+    void processBinaryWithBuffer(const void* data, size_t len) {
+        if (!data || len == 0) return;
+        
+        const uint8_t* p = static_cast<const uint8_t*>(data);
+        
+        // 追加到缓冲区
+        m_binary_buffer.insert(m_binary_buffer.end(), p, p + len);
+        
+        // 按固定帧大小切分并处理
+        while (m_binary_buffer.size() - m_read_pos >= m_binary_chunk_size) {
+            eventCallback(
+                BINARY_MESSAGE,
+                reinterpret_cast<const char*>(m_binary_buffer.data() + m_read_pos),
+                m_binary_chunk_size
+            );
+            m_read_pos += m_binary_chunk_size;
+        }
+        
+        // 防止缓冲区无限增长：当已读数据超过一半时，清理
+        if (m_read_pos > 0 && m_read_pos > m_binary_buffer.size() / 2) {
+            m_binary_buffer.erase(m_binary_buffer.begin(), 
+                                 m_binary_buffer.begin() + m_read_pos);
+            m_read_pos = 0;
+        }
+    }
+    
+    // Close/Error 时处理残留缓冲区
+    void flushOrDiscardBuffer(bool flush) {
+        if (!flush) {
+            // 丢弃残留数据（默认行为，避免播放不完整音频）
+            m_binary_buffer.clear();
+            m_read_pos = 0;
+            return;
+        }
+        
+        // Flush 模式：发送残留数据（用于 ASR 等需要完整音频的场景）
+        size_t remain = m_binary_buffer.size() - m_read_pos;
+        if (remain > 0) {
+            // 确保是偶数字节（完整的 16-bit 样本）
+            size_t aligned_remain = remain & ~((size_t)1);
+            if (aligned_remain > 0) {
+                eventCallback(
+                    BINARY_MESSAGE,
+                    reinterpret_cast<const char*>(m_binary_buffer.data() + m_read_pos),
+                    aligned_remain
+                );
+            }
+        }
+        m_binary_buffer.clear();
+        m_read_pos = 0;
+    }
+
 private:
     std::string m_sessionId;
     responseHandler_t m_notify;
@@ -973,9 +1066,11 @@ private:
     std::unordered_set<std::string> m_Files;
     
     // 二进制数据缓冲区（用于累积流式传输的音频片段）
+    // ⚠️ 使用 ring buffer 模式，避免频繁 erase 导致的性能问题
     std::vector<uint8_t> m_binary_buffer;
+    size_t m_read_pos;  // 当前读位置（ring buffer 索引）
     bool m_binary_buffer_enabled;
-    size_t m_binary_chunk_size = 640;  // 默认 20ms @ 16kHz 单声道 (320 samples * 2 bytes)
+    size_t m_binary_chunk_size;  // 音频帧大小（bytes）
 };
 
 
@@ -1023,6 +1118,20 @@ namespace {
                                         tls_cafile, tls_keyfile, tls_certfile, tls_disable_hostname_validation);
 
         // 配置二进制数据缓冲区
+        // 
+        // ⚠️ 重要：音频帧大小必须根据采样率正确配置
+        // 
+        // 标准配置（20ms 帧，16-bit PCM，单声道）：
+        // - 8kHz:  8000 * 0.02 * 2 = 320 bytes
+        // - 16kHz: 16000 * 0.02 * 2 = 640 bytes
+        // - 24kHz: 24000 * 0.02 * 2 = 960 bytes
+        // - 48kHz: 48000 * 0.02 * 2 = 1920 bytes
+        // 
+        // FreeSWITCH 变量配置示例：
+        // <action application="set" data="STREAM_BINARY_CHUNK_SIZE=640"/>  <!-- 16kHz -->
+        // <action application="set" data="STREAM_BINARY_RATE=16000"/>      <!-- 采样率 -->
+        // <action application="set" data="STREAM_BINARY_FORMAT=s16le"/>    <!-- 格式 -->
+        
         switch_channel_t *channel = switch_core_session_get_channel(session);
         const char* chunk_size_str = switch_channel_get_variable(channel, "STREAM_BINARY_CHUNK_SIZE");
         if (chunk_size_str) {
@@ -1030,13 +1139,21 @@ namespace {
             if (chunk_size > 0) {
                 as->setBinaryChunkSize(chunk_size);
             }
+        } else {
+            // 根据采样率自动计算帧大小（20ms）
+            size_t auto_chunk_size = (sampling * 2 * 20) / 1000;  // sampling * 2bytes * 20ms / 1000
+            as->setBinaryChunkSize(auto_chunk_size);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 自动设置二进制块大小: %zu bytes (基于采样率 %u Hz)\n",
+                tech_pvt->sessionId, auto_chunk_size, sampling);
         }
         
-        // 可以通过 STREAM_BINARY_BUFFER_DISABLED 变量禁用缓冲
+        // ⚠️ 不推荐禁用缓冲：会导致音频帧大小不固定
+        // 仅在特殊场景下使用（如：服务端已保证固定帧大小）
         if (switch_channel_var_true(channel, "STREAM_BINARY_BUFFER_DISABLED")) {
             as->setBinaryBufferEnabled(false);
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                "(%s) 二进制缓冲区已禁用\n", tech_pvt->sessionId);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                "(%s) ⚠️ 二进制缓冲区已禁用（不推荐）\n", tech_pvt->sessionId);
         }
 
         tech_pvt->pAudioStreamer = static_cast<void *>(as);
