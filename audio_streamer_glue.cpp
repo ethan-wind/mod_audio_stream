@@ -165,68 +165,60 @@ public:
         // 
         // ⚠️ 关键：区分 WebSocket 文本帧和二进制帧
         // 
-        // 假设 WebSocketClient 提供了以下回调（需要根据实际库调整）：
-        // - setMessageCallback: 文本帧（JSON 控制消息）
-        // - setBinaryCallback: 二进制帧（原始音频流）
-        //
-        // 如果库不支持分离回调，需要在回调内部判断帧类型
+        // WebSocketClient 只提供统一的 setMessageCallback
+        // 需要在回调内部通过启发式方法判断帧类型：
+        // - 文本帧（JSON）：通常以 '{' 或 '[' 开头
+        // - 二进制帧（音频）：原始字节流
         
-        // 文本消息回调：处理 JSON 控制消息
         client.setMessageCallback([this](const std::string& message) {
             if (message.empty()) {
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-                    "(%s) ⚠️ [WebSocket] 收到空文本消息\n", m_sessionId.c_str());
+                    "(%s) ⚠️ [WebSocket] 收到空消息\n", m_sessionId.c_str());
                 return;
             }
             
-            // 文本帧：JSON 控制消息
-            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
-                "(%s) 📝 [WebSocket] 收到文本消息: %zu bytes\n",
-                m_sessionId.c_str(), message.size());
+            // 启发式判断：检查第一个字节是否是 JSON 起始符
+            // JSON 文本帧：'{' (0x7B) 或 '[' (0x5B)
+            // 二进制音频帧：通常是 PCM 数据（任意字节值）
+            bool is_json = (message[0] == '{' || message[0] == '[');
             
-            // 处理 JSON 消息（不是音频数据）
-            eventCallback(MESSAGE, message.c_str(), message.size());
-        });
-        
-        // 二进制消息回调：处理原始音频流
-        // 
-        // ⚠️ 注意：如果 WebSocketClient 不支持 setBinaryCallback，
-        // 需要在 setMessageCallback 中通过其他方式判断帧类型
-        // 例如：检查第一个字节是否是 JSON 起始符 '{' 或 '['
-        client.setBinaryCallback([this](const std::string& data) {
-            if (data.empty()) {
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-                    "(%s) ⚠️ [WebSocket] 收到空二进制消息\n", m_sessionId.c_str());
-                return;
-            }
-            
-            // 二进制帧：原始音频数据
-            // 使用 data.data() 和 data.size() 确保获取完整的二进制数据（包括 \0）
-            
-            // 降低日志频率：每 50 包打印一次，避免高频日志影响性能
-            static uint64_t binary_recv_count = 0;
-            binary_recv_count++;
-            if (binary_recv_count % 50 == 0) {
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-                    "(%s) 🎵 [WebSocket] 收到二进制消息 #%llu: %zu bytes, 缓冲启用: %d\n",
-                    m_sessionId.c_str(), (unsigned long long)binary_recv_count, 
-                    data.size(), m_binary_buffer_enabled);
-            }
-            
-            // ⚠️ 关键修复：必须使用缓冲区进行音频帧切分
-            // WebSocket message ≠ 音频帧，必须按固定大小切分
-            if (m_binary_buffer_enabled) {
-                // 使用 ring buffer 索引而不是 vector erase（避免频繁内存移动）
-                processBinaryWithBuffer(data.data(), data.size());
+            if (is_json) {
+                // 文本帧：JSON 控制消息
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                    "(%s) 📝 [WebSocket] 收到 JSON 消息: %zu bytes\n",
+                    m_sessionId.c_str(), message.size());
+                
+                // 处理 JSON 消息（不是音频数据）
+                eventCallback(MESSAGE, message.c_str(), message.size());
             } else {
-                // ⚠️ 警告：直接处理模式不推荐用于音频流
-                // 会导致音频帧大小不固定，下游播放器可能出现 jitter/卡顿
-                if (binary_recv_count % 100 == 0) {
-                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-                        "(%s) ⚠️ [直接处理] 音频数据未经缓冲切帧: %zu bytes (可能导致播放问题)\n",
-                        m_sessionId.c_str(), data.size());
+                // 二进制帧：原始音频数据
+                // 使用 message.data() 和 message.size() 确保获取完整的二进制数据（包括 \0）
+                
+                // 降低日志频率：每 50 包打印一次，避免高频日志影响性能
+                static uint64_t binary_recv_count = 0;
+                binary_recv_count++;
+                if (binary_recv_count % 50 == 0) {
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
+                        "(%s) 🎵 [WebSocket] 收到二进制消息 #%llu: %zu bytes, 缓冲启用: %d\n",
+                        m_sessionId.c_str(), (unsigned long long)binary_recv_count, 
+                        message.size(), m_binary_buffer_enabled);
                 }
-                eventCallback(BINARY_MESSAGE, data.data(), data.size());
+                
+                // ⚠️ 关键修复：必须使用缓冲区进行音频帧切分
+                // WebSocket message ≠ 音频帧，必须按固定大小切分
+                if (m_binary_buffer_enabled) {
+                    // 使用 ring buffer 索引而不是 vector erase（避免频繁内存移动）
+                    processBinaryWithBuffer(message.data(), message.size());
+                } else {
+                    // ⚠️ 警告：直接处理模式不推荐用于音频流
+                    // 会导致音频帧大小不固定，下游播放器可能出现 jitter/卡顿
+                    if (binary_recv_count % 100 == 0) {
+                        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                            "(%s) ⚠️ [直接处理] 音频数据未经缓冲切帧: %zu bytes (可能导致播放问题)\n",
+                            m_sessionId.c_str(), message.size());
+                    }
+                    eventCallback(BINARY_MESSAGE, message.data(), message.size());
+                }
             }
         });
 
