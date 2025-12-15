@@ -115,10 +115,14 @@ public:
         client.setUrl(wsUri);
         
         // 配置二进制缓冲区大小（从环境变量或使用默认值）
-        // 默认 640 bytes = 20ms @ 16kHz 单声道 (320 samples * 2 bytes)
+        // 默认禁用缓冲，直接处理每个 WebSocket 消息
         // 可以通过 STREAM_BINARY_CHUNK_SIZE 变量配置
-        m_binary_chunk_size = 640;
-        m_binary_buffer_enabled = true;
+        m_binary_chunk_size = 320;
+        m_binary_buffer_enabled = false;  // 默认禁用缓冲，直接处理
+        
+        switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+            "(%s) 🔧 [初始化] 二进制块大小: %zu bytes, 缓冲启用: %d (默认禁用，直接处理)\n",
+            uuid, m_binary_chunk_size, m_binary_buffer_enabled);
 
         // Setup eventual TLS options.
         // tls_cafile may hold the special values
@@ -165,11 +169,9 @@ public:
             
             // 所有消息都当作二进制音频数据处理
             // 使用 message.data() 而不是 message.c_str() 来确保获取完整的二进制数据
-            if (!m_suppress_log) {
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_DEBUG,
-                    "(%s) 🎵 [WebSocket] 二进制消息: %zu bytes\n",
-                    m_sessionId.c_str(), message.size());
-            }
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                "(%s) 🎵 [WebSocket] 收到二进制消息: %zu bytes, 缓冲启用: %d, 块大小: %zu\n",
+                m_sessionId.c_str(), message.size(), m_binary_buffer_enabled, m_binary_chunk_size);
             
             // 如果启用了缓冲区，累积数据直到达到一定大小
             if (m_binary_buffer_enabled) {
@@ -178,18 +180,41 @@ public:
                                       message.begin(), 
                                       message.end());
                 
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                    "(%s) 📦 [缓冲区] 当前大小: %zu bytes, 阈值: %zu bytes\n",
+                    m_sessionId.c_str(), m_binary_buffer.size(), m_binary_chunk_size);
+                
                 // 当缓冲区达到阈值时，处理数据
                 while (m_binary_buffer.size() >= m_binary_chunk_size) {
                     // 提取一个完整的音频块（确保是偶数字节）
                     size_t process_size = m_binary_chunk_size & ~((size_t)1);
+                    
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                        "(%s) ✅ [缓冲区] 处理音频块: %zu bytes\n",
+                        m_sessionId.c_str(), process_size);
+                    
                     eventCallback(BINARY_MESSAGE, reinterpret_cast<const char*>(m_binary_buffer.data()), process_size);
                     
                     // 从缓冲区移除已处理的数据
                     m_binary_buffer.erase(m_binary_buffer.begin(), 
                                          m_binary_buffer.begin() + process_size);
                 }
+                
+                // 如果缓冲区有数据但不足一个完整块，且数据量合理（至少有一些样本），也处理
+                // 这样可以避免小数据包一直累积但从不播放的问题
+                if (m_binary_buffer.size() >= 160 && m_binary_buffer.size() % 2 == 0) {
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                        "(%s) 🔄 [缓冲区] 处理剩余数据: %zu bytes (未达到阈值但足够播放)\n",
+                        m_sessionId.c_str(), m_binary_buffer.size());
+                    
+                    eventCallback(BINARY_MESSAGE, reinterpret_cast<const char*>(m_binary_buffer.data()), m_binary_buffer.size());
+                    m_binary_buffer.clear();
+                }
             } else {
                 // 直接处理（不缓冲）
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                    "(%s) ⚡ [直接处理] 音频数据: %zu bytes\n",
+                    m_sessionId.c_str(), message.size());
                 eventCallback(BINARY_MESSAGE, message.data(), message.size());
             }
         });
@@ -305,6 +330,9 @@ public:
                 }
                 case BINARY_MESSAGE: {
                     // 处理原始二进制音频数据流
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                        "(%s) 🔊 [eventCallback] 调用 processBinaryAudio: %zu bytes\n",
+                        m_sessionId.c_str(), len);
                     processBinaryAudio(psession, (const uint8_t*)message, len);
                     break;
                 }
@@ -319,6 +347,9 @@ public:
     // 处理原始二进制音频流
     // 支持格式：PCM S16LE/S16BE (16-bit Signed Little/Big Endian)
     void processBinaryAudio(switch_core_session_t* session, const uint8_t* data, size_t len) {
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+            "(%s) 🎯 [processBinaryAudio] 开始处理: %zu bytes\n", m_sessionId.c_str(), len);
+        
         if (!data || len == 0) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
                 "(%s) processBinaryAudio: 数据为空\n", m_sessionId.c_str());
@@ -390,15 +421,21 @@ public:
         private_t *tech_pvt = nullptr;
         if (bug) {
             tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) ✅ [tech_pvt] 获取成功, stream_play_enabled=%d\n",
+                m_sessionId.c_str(), tech_pvt ? tech_pvt->stream_play_enabled : -1);
         } else {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
-                "(%s) 无法获取 media bug - 无法播放音频\n", m_sessionId.c_str());
+                "(%s) ❌ [tech_pvt] 无法获取 media bug - 无法播放音频\n", m_sessionId.c_str());
             return;
         }
         
         // 步骤 2: 重采样到通话采样率并写入播放缓冲区
         
         if (tech_pvt && tech_pvt->stream_play_enabled) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 🎼 [播放] 开始处理音频: 输入采样率=%d Hz, 目标采样率=%d Hz\n",
+                m_sessionId.c_str(), sampleRate, tech_pvt->sampling);
             int target_rate = tech_pvt->sampling;      // 通话采样率 (8000/16000 Hz)
             int target_channels = tech_pvt->channels;  // 通话声道数 (通常为1)
             
@@ -454,28 +491,24 @@ public:
             size_t data_size = playbackSamples.size() * sizeof(int16_t);
             size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
             
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 📝 [写入缓冲区] 准备写入: %zu bytes (%zu samples), 可用空间: %zu bytes\n",
+                m_sessionId.c_str(), data_size, playbackSamples.size(), available);
+            
             if (available >= data_size) {
-                switch_buffer_write(tech_pvt->play_buffer,
+                size_t written = switch_buffer_write(tech_pvt->play_buffer,
                                    (uint8_t*)playbackSamples.data(),
                                    data_size);
                 
-                if (!m_suppress_log) {
-                    size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
-                    double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
-                    
-                    // 每 100 次打印一次日志
-                    static uint64_t write_count = 0;
-                    write_count++;
-                    if (write_count % 100 == 0) {
-                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                            "(%s) 写入音频 #%llu: %zu bytes → %zu samples @ %d Hz, 缓冲区: %.2f ms\n",
-                            m_sessionId.c_str(), (unsigned long long)write_count,
-                            processed_len, playbackSamples.size(), target_rate, buffer_ms);
-                    }
-                }
+                size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+                double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+                
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                    "(%s) ✅ [写入缓冲区] 成功: 写入=%zu bytes, 缓冲区: %.2f ms\n",
+                    m_sessionId.c_str(), written, buffer_ms);
             } else {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                    "(%s) 播放缓冲区已满，丢弃 %zu samples\n",
+                    "(%s) ❌ [写入缓冲区] 已满，丢弃 %zu samples\n",
                     m_sessionId.c_str(), playbackSamples.size());
             }
             switch_mutex_unlock(tech_pvt->play_mutex);
