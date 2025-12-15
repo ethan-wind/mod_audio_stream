@@ -272,23 +272,14 @@ public:
             return;
         }
 
-        // 处理二进制音频数据
-        // 假设二进制数据格式：前4字节为采样率(小端序)，后续为音频数据
-        if (data.size() < 4) {
+        // 直接播放收到的二进制原始消息
+        // 假设数据格式：16-bit Linear PCM，采样率与通话采样率一致
+        if (data.empty()) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_WARNING,
-                "(%s) 二进制消息太短: %zu bytes\n", m_sessionId.c_str(), data.size());
+                "(%s) 收到空的二进制消息\n", m_sessionId.c_str());
             switch_core_session_rwunlock(psession);
             return;
         }
-
-        // 读取采样率（小端序）
-        uint32_t sampleRate = data[0] | (data[1] << 8) | (data[2] << 16) | (data[3] << 24);
-        const uint8_t* audioData = data.data() + 4;
-        size_t audioDataSize = data.size() - 4;
-
-        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
-            "(%s) 接收二进制音频: sampleRate=%u Hz, size=%zu bytes\n",
-            m_sessionId.c_str(), sampleRate, audioDataSize);
 
         // 获取 tech_pvt 用于流式播放
         auto *bug = get_media_bug(psession);
@@ -298,60 +289,28 @@ public:
         }
 
         if (tech_pvt && tech_pvt->stream_play_enabled) {
-            // 假设二进制数据是 16-bit PCM
-            size_t input_samples = audioDataSize / sizeof(int16_t);
-            const int16_t* pcm16bit = reinterpret_cast<const int16_t*>(audioData);
-            
-            int target_rate = tech_pvt->sampling;
-            std::vector<int16_t> playbackSamples;
-
-            // 重采样到通话采样率
-            if (sampleRate != target_rate) {
-                int err;
-                SpeexResamplerState* resampler = speex_resampler_init(
-                    1, sampleRate, target_rate, SWITCH_RESAMPLE_QUALITY, &err
-                );
-                
-                if (err == 0 && resampler) {
-                    size_t output_samples = ((uint64_t)input_samples * target_rate + sampleRate - 1) / sampleRate;
-                    playbackSamples.resize(output_samples);
-                    spx_uint32_t in_len = input_samples;
-                    spx_uint32_t out_len = output_samples;
-                    
-                    speex_resampler_process_int(resampler, 0,
-                                                pcm16bit, &in_len,
-                                                playbackSamples.data(), &out_len);
-                    
-                    playbackSamples.resize(out_len);
-                    speex_resampler_destroy(resampler);
-                } else {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_ERROR,
-                        "(%s) 重采样器初始化失败\n", m_sessionId.c_str());
-                    playbackSamples.assign(pcm16bit, pcm16bit + input_samples);
-                }
-            } else {
-                playbackSamples.assign(pcm16bit, pcm16bit + input_samples);
-            }
-
-            // 写入播放缓冲区
+            // 直接写入播放缓冲区，不做任何转换
             switch_mutex_lock(tech_pvt->play_mutex);
-            size_t data_size = playbackSamples.size() * sizeof(int16_t);
+            size_t data_size = data.size();
             size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
             
             if (available >= data_size) {
                 switch_buffer_write(tech_pvt->play_buffer,
-                                   (uint8_t*)playbackSamples.data(),
+                                   data.data(),
                                    data_size);
                 
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
-                    "(%s) 二进制音频写入缓冲区: %zu samples\n",
-                    m_sessionId.c_str(), playbackSamples.size());
+                    "(%s) 二进制音频写入缓冲区: %zu bytes\n",
+                    m_sessionId.c_str(), data_size);
             } else {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_WARNING,
-                    "(%s) 播放缓冲区已满，丢弃 %zu samples\n",
-                    m_sessionId.c_str(), playbackSamples.size());
+                    "(%s) 播放缓冲区已满 (需要 %zu bytes, 可用 %zu bytes)，丢弃数据\n",
+                    m_sessionId.c_str(), data_size, available);
             }
             switch_mutex_unlock(tech_pvt->play_mutex);
+        } else {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                "(%s) 流式播放未启用或 tech_pvt 为空\n", m_sessionId.c_str());
         }
 
         switch_core_session_rwunlock(psession);
