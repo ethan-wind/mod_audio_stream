@@ -298,10 +298,6 @@ public:
                 switch_buffer_write(tech_pvt->play_buffer,
                                    data.data(),
                                    data_size);
-                
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
-                    "(%s) 二进制音频写入缓冲区: %zu bytes\n",
-                    m_sessionId.c_str(), data_size);
             } else {
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_WARNING,
                     "(%s) 播放缓冲区已满 (需要 %zu bytes, 可用 %zu bytes)，丢弃数据\n",
