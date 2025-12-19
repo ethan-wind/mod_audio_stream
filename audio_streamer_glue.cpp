@@ -318,6 +318,33 @@ public:
         if (!json) {
             return status;
         }
+        
+        // 处理 stop_playback 消息
+        const char* jsAction = cJSON_GetObjectCstr(json, "action");
+        if (jsAction && strcmp(jsAction, "stop_playback") == 0) {
+            const char* jsReason = cJSON_GetObjectCstr(json, "reason");
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 收到 stop_playback 消息，原因: %s\n",
+                m_sessionId.c_str(), jsReason ? jsReason : "未指定");
+            
+            // 清空播放缓冲区，打断当前播放
+            auto *bug = get_media_bug(session);
+            if (bug) {
+                auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+                if (tech_pvt && tech_pvt->play_buffer) {
+                    switch_mutex_lock(tech_pvt->play_mutex);
+                    switch_buffer_zero(tech_pvt->play_buffer);
+                    switch_mutex_unlock(tech_pvt->play_mutex);
+                    
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                        "(%s) 播放缓冲区已清空，语音流已打断\n", m_sessionId.c_str());
+                }
+            }
+            
+            cJSON_Delete(json);
+            return SWITCH_TRUE;
+        }
+        
         const char* jsType = cJSON_GetObjectCstr(json, "type");
         if(jsType && strcmp(jsType, "streamAudio") == 0) {
             cJSON* jsonData = cJSON_GetObjectItem(json, "data");
