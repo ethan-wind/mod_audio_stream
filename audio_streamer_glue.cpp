@@ -319,8 +319,34 @@ public:
             return status;
         }
         
-        // 处理 stop_playback 消息
+        // 处理 turnHuman 消息
         const char* jsAction = cJSON_GetObjectCstr(json, "action");
+        if (jsAction && strcmp(jsAction, "turnHuman") == 0) {
+            const char* jsServiceNumber = cJSON_GetObjectCstr(json, "serviceNumber");
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 收到 turnHuman 消息，serviceNumber: %s\n",
+                m_sessionId.c_str(), jsServiceNumber ? jsServiceNumber : "未指定");
+            
+            // 抛出自定义事件给 ESL
+            switch_event_t *event = NULL;
+            if (switch_event_create(&event, SWITCH_EVENT_CUSTOM) == SWITCH_STATUS_SUCCESS) {
+                switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Event-Subclass", "audio_stream");
+                switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "turnHuman");
+                if (jsServiceNumber) {
+                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Service-Number", jsServiceNumber);
+                }
+                switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Channel-Call-UUID", m_sessionId.c_str());
+                switch_event_fire(&event);
+                
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                    "(%s) turnHuman 事件已抛出\n", m_sessionId.c_str());
+            }
+            
+            cJSON_Delete(json);
+            return SWITCH_TRUE;
+        }
+        
+        // 处理 stop_playback 消息
         if (jsAction && strcmp(jsAction, "stop_playback") == 0) {
             const char* jsReason = cJSON_GetObjectCstr(json, "reason");
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
