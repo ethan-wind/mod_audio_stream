@@ -323,9 +323,15 @@ public:
         const char* jsAction = cJSON_GetObjectCstr(json, "action");
         if (jsAction && strcmp(jsAction, "turnHuman") == 0) {
             const char* jsServiceNumber = cJSON_GetObjectCstr(json, "serviceNumber");
+            const char* jsAccountId = cJSON_GetObjectCstr(json, "accountId");
+            const char* jsCustomerNumber = cJSON_GetObjectCstr(json, "customerNumber");
+            
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                "(%s) 收到 turnHuman 消息，serviceNumber: %s\n",
-                m_sessionId.c_str(), jsServiceNumber ? jsServiceNumber : "未指定");
+                "(%s) 收到 turnHuman 消息，serviceNumber: %s, accountId: %s, customerNumber: %s\n",
+                m_sessionId.c_str(), 
+                jsServiceNumber ? jsServiceNumber : "未指定",
+                jsAccountId ? jsAccountId : "未指定",
+                jsCustomerNumber ? jsCustomerNumber : "未指定");
             
             // 抛出自定义事件给 ESL
             switch_event_t *event = NULL;
@@ -334,6 +340,12 @@ public:
                 switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "turnHuman");
                 if (jsServiceNumber) {
                     switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Service-Number", jsServiceNumber);
+                }
+                if (jsAccountId) {
+                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "AccountId", jsAccountId);
+                }
+                if (jsCustomerNumber) {
+                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Customer-Number", jsCustomerNumber);
                 }
                 switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Channel-Call-UUID", m_sessionId.c_str());
                 switch_event_fire(&event);
