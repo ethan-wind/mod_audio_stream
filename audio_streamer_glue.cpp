@@ -358,6 +358,31 @@ public:
             return SWITCH_TRUE;
         }
         
+        // 处理 hangup 消息
+        if (jsAction && strcmp(jsAction, "hangup") == 0) {
+            const char* jsReason = cJSON_GetObjectCstr(json, "reason");
+            
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 收到 hangup 消息，reason: %s\n",
+                m_sessionId.c_str(), 
+                jsReason ? jsReason : "未指定");
+            
+            // 抛出自定义挂机事件给 ESL
+            switch_event_t *event = NULL;
+            if (switch_event_create(&event, SWITCH_EVENT_CUSTOM) == SWITCH_STATUS_SUCCESS) {
+                switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Event-Subclass", "audio_stream");
+                switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "hangup");
+                switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Channel-Call-UUID", m_sessionId.c_str());
+                switch_event_fire(&event);
+                
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                    "(%s) hangup 事件已抛出\n", m_sessionId.c_str());
+            }
+            
+            cJSON_Delete(json);
+            return SWITCH_TRUE;
+        }
+        
         // 处理 stop_playback 消息
         if (jsAction && strcmp(jsAction, "stop_playback") == 0) {
             const char* jsReason = cJSON_GetObjectCstr(json, "reason");
