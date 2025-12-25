@@ -9,6 +9,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include "base64.h"
+#include <atomic>
 
 #define FRAME_SIZE_8000  320 /* 1000x0.02 (20ms)= 160 x(16bit= 2 bytes) 320 frame size*/
 
@@ -92,7 +93,8 @@ public:
                     bool suppressLog, const char* extra_headers, bool no_reconnect,
                     const char* tls_cafile, const char* tls_keyfile, const char* tls_certfile,
                     bool tls_disable_hostname_validation): m_sessionId(uuid), m_notify(callback),
-                    m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0){
+                    m_suppress_log(suppressLog), m_extra_headers(extra_headers), m_playFile(0), 
+                    m_current_audio_sequence(0) {  // 初始化音频序列号
 
         WebSocketHeaders hdrs;
         WebSocketTLSOptions tls;
@@ -289,8 +291,23 @@ public:
         }
 
         if (tech_pvt && tech_pvt->stream_play_enabled) {
+            // 获取当前音频序列号（原子操作）
+            uint64_t current_sequence = m_current_audio_sequence.load(std::memory_order_acquire);
+            
             // 写入播放缓冲区（使用互斥锁保护，防止与打断操作冲突）
             switch_mutex_lock(tech_pvt->play_mutex);
+            
+            // 再次检查序列号（防止在获取锁期间发生打断）
+            if (current_sequence != tech_pvt->audio_sequence) {
+                switch_mutex_unlock(tech_pvt->play_mutex);
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_WARNING,
+                    "(%s) 丢弃旧音频数据 %zu bytes (序列号不匹配: %llu vs %llu)\n",
+                    m_sessionId.c_str(), data.size(), 
+                    (unsigned long long)current_sequence, 
+                    (unsigned long long)tech_pvt->audio_sequence);
+                switch_core_session_rwunlock(psession);
+                return;
+            }
             
             size_t data_size = data.size();
             size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
@@ -309,8 +326,10 @@ public:
                 // 只在缓冲区从空变为有数据时记录日志（表示新音频流开始）
                 if (buffer_inuse == 0 && new_inuse > 0) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
-                        "(%s) 开始播放新音频流，缓冲区: %.2f ms (打断计数: %u)\n",
-                        m_sessionId.c_str(), buffer_ms, tech_pvt->interrupt_count);
+                        "(%s) 开始播放新音频流，缓冲区: %.2f ms，序列号: %llu (打断计数: %u)\n",
+                        m_sessionId.c_str(), buffer_ms, 
+                        (unsigned long long)tech_pvt->audio_sequence,
+                        tech_pvt->interrupt_count);
                     
                     // 重置打断计数器（新音频流开始）
                     if (switch_time_now() - tech_pvt->last_interrupt_time > 2000000) {  // 2秒后重置
@@ -441,6 +460,13 @@ public:
                     }
                     tech_pvt->last_interrupt_time = now;
                     
+                    // 递增音频序列号（关键：防止旧音频混入）
+                    uint64_t old_sequence = tech_pvt->audio_sequence;
+                    tech_pvt->audio_sequence++;
+                    
+                    // 同步更新 AudioStreamer 的序列号
+                    m_current_audio_sequence.store(tech_pvt->audio_sequence, std::memory_order_release);
+                    
                     // 清空播放缓冲区
                     switch_buffer_zero(tech_pvt->play_buffer);
                     
@@ -450,8 +476,9 @@ public:
                     switch_mutex_unlock(tech_pvt->play_mutex);
                     
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                        "(%s) 播放已打断，清空缓冲区 %.2f ms (%.2f KB)，准备接收新音频\n",
-                        m_sessionId.c_str(), buffer_ms, buffer_inuse / 1024.0);
+                        "(%s) 播放已打断，清空缓冲区 %.2f ms (%.2f KB)，序列号: %llu → %llu\n",
+                        m_sessionId.c_str(), buffer_ms, buffer_inuse / 1024.0, 
+                        (unsigned long long)old_sequence, (unsigned long long)tech_pvt->audio_sequence);
                 } else {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
                         "(%s) 无法打断播放：tech_pvt 或 play_buffer 为空\n", m_sessionId.c_str());
@@ -863,6 +890,7 @@ private:
     const char* m_extra_headers;
     int m_playFile;
     std::unordered_set<std::string> m_Files;
+    std::atomic<uint64_t> m_current_audio_sequence;  // 当前音频序列号（原子操作）
 };
 
 
@@ -936,6 +964,7 @@ namespace {
         tech_pvt->last_buffer_inuse = 0;
         tech_pvt->interrupt_count = 0;
         tech_pvt->last_interrupt_time = 0;
+        tech_pvt->audio_sequence = 0;  // 初始化音频序列号
 
         tech_pvt->write_frame_data = (uint8_t*)switch_core_session_alloc(session, SWITCH_RECOMMENDED_BUFFER_SIZE);
         if (!tech_pvt->write_frame_data) {

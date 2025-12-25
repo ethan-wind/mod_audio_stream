@@ -42,6 +42,7 @@ struct private_data {
     size_t last_buffer_inuse;          // 上次缓冲区大小（用于检测播放结束）
     uint32_t interrupt_count;          // 打断计数器（用于检测频繁打断）
     switch_time_t last_interrupt_time; // 上次打断时间
+    uint64_t audio_sequence;           // 音频序列号（用于防止旧音频混入）
     
     // 播放线程支持
     switch_thread_t *play_thread;      // 播放线程
