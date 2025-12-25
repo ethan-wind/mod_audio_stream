@@ -34,6 +34,7 @@ namespace {
     
     // A-law 段查找表
     static const int16_t seg_aend[8] = {0x1F, 0x3F, 0x7F, 0xFF, 0x1FF, 0x3FF, 0x7FF, 0xFFF};
+    constexpr switch_time_t kInterruptGuardUs = 200000;  // 200ms guard window after stop_playback
     
     // 查找段号
     static int16_t search(int16_t val, const int16_t *table, int16_t size) {
@@ -293,10 +294,21 @@ public:
         if (tech_pvt && tech_pvt->stream_play_enabled) {
             // 获取当前音频序列号（原子操作）
             uint64_t current_sequence = m_current_audio_sequence.load(std::memory_order_acquire);
+            switch_time_t now = switch_time_now();
             
             // 写入播放缓冲区（使用互斥锁保护，防止与打断操作冲突）
             switch_mutex_lock(tech_pvt->play_mutex);
             
+            if (tech_pvt->last_interrupt_time &&
+                (now - tech_pvt->last_interrupt_time) < kInterruptGuardUs) {
+                switch_mutex_unlock(tech_pvt->play_mutex);
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
+                    "(%s) 打断保护期内丢弃音频 %zu bytes\n",
+                    m_sessionId.c_str(), data.size());
+                switch_core_session_rwunlock(psession);
+                return;
+            }
+
             // 再次检查序列号（防止在获取锁期间发生打断）
             if (current_sequence != tech_pvt->audio_sequence) {
                 switch_mutex_unlock(tech_pvt->play_mutex);
@@ -497,6 +509,27 @@ public:
             cJSON* jsonData = cJSON_GetObjectItem(json, "data");
             if(jsonData) {
                 cJSON* jsonFile = nullptr;
+                auto *bug = get_media_bug(session);
+                private_t *tech_pvt = nullptr;
+                if (bug) {
+                    tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+                }
+
+                if (tech_pvt) {
+                    switch_time_t now = switch_time_now();
+                    switch_mutex_lock(tech_pvt->play_mutex);
+                    bool in_guard = tech_pvt->last_interrupt_time &&
+                        (now - tech_pvt->last_interrupt_time) < kInterruptGuardUs;
+                    switch_mutex_unlock(tech_pvt->play_mutex);
+
+                    if (in_guard) {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                            "(%s) 打断保护期内丢弃 streamAudio\n", m_sessionId.c_str());
+                        cJSON_Delete(json);
+                        return SWITCH_TRUE;
+                    }
+                }
+
                 cJSON* jsonAudio = cJSON_DetachItemFromObject(jsonData, "audioData");
                 const char* jsAudioDataType = cJSON_GetObjectCstr(jsonData, "audioDataType");
                 
@@ -590,13 +623,6 @@ public:
                             
                             // 转换公式: Float32 [-1.0, 1.0] → 16-bit PCM [-32767, 32767]
                             pcm16bit[i] = static_cast<int16_t>(sample * 32767.0f);
-                        }
-                        
-                        // 获取 tech_pvt 用于流式播放
-                        auto *bug = get_media_bug(session);
-                        private_t *tech_pvt = nullptr;
-                        if (bug) {
-                            tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
                         }
                         
                         // ========== 步骤 2: 重采样到通话采样率 ==========
