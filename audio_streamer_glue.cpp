@@ -289,20 +289,42 @@ public:
         }
 
         if (tech_pvt && tech_pvt->stream_play_enabled) {
-            // 直接写入播放缓冲区，不做任何转换
+            // 写入播放缓冲区（使用互斥锁保护，防止与打断操作冲突）
             switch_mutex_lock(tech_pvt->play_mutex);
+            
             size_t data_size = data.size();
             size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
+            size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
             
             if (available >= data_size) {
                 switch_buffer_write(tech_pvt->play_buffer,
                                    data.data(),
                                    data_size);
+                
+                // 计算缓冲区时长（毫秒）
+                size_t new_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+                double buffer_ms = (double)new_inuse / 
+                                  (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+                
+                // 只在缓冲区从空变为有数据时记录日志（表示新音频流开始）
+                if (buffer_inuse == 0 && new_inuse > 0) {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                        "(%s) 开始播放新音频流，缓冲区: %.2f ms (打断计数: %u)\n",
+                        m_sessionId.c_str(), buffer_ms, tech_pvt->interrupt_count);
+                    
+                    // 重置打断计数器（新音频流开始）
+                    if (switch_time_now() - tech_pvt->last_interrupt_time > 2000000) {  // 2秒后重置
+                        tech_pvt->interrupt_count = 0;
+                    }
+                }
             } else {
+                double buffer_ms = (double)buffer_inuse / 
+                                  (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_WARNING,
-                    "(%s) 播放缓冲区已满 (需要 %zu bytes, 可用 %zu bytes)，丢弃数据\n",
-                    m_sessionId.c_str(), data_size, available);
+                    "(%s) 播放缓冲区已满 (%.2f ms)，丢弃 %zu bytes\n",
+                    m_sessionId.c_str(), buffer_ms, data_size);
             }
+            
             switch_mutex_unlock(tech_pvt->play_mutex);
         } else {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_DEBUG,
@@ -383,7 +405,7 @@ public:
             return SWITCH_TRUE;
         }
         
-        // 处理 stop_playback 消息
+        // 处理 stop_playback 消息（语音打断）
         if (jsAction && strcmp(jsAction, "stop_playback") == 0) {
             const char* jsReason = cJSON_GetObjectCstr(json, "reason");
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
@@ -396,12 +418,47 @@ public:
                 auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
                 if (tech_pvt && tech_pvt->play_buffer) {
                     switch_mutex_lock(tech_pvt->play_mutex);
+                    
+                    // 获取打断前的缓冲区状态
+                    size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+                    double buffer_ms = (double)buffer_inuse / 
+                                      (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+                    
+                    // 检测频繁打断（1秒内超过5次）
+                    switch_time_t now = switch_time_now();
+                    switch_time_t time_diff = now - tech_pvt->last_interrupt_time;
+                    
+                    if (time_diff < 1000000) {  // 1秒 = 1,000,000 微秒
+                        tech_pvt->interrupt_count++;
+                        if (tech_pvt->interrupt_count > 5) {
+                            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                "(%s) 检测到频繁打断 (%u 次/秒)，可能存在异常\n",
+                                m_sessionId.c_str(), tech_pvt->interrupt_count);
+                        }
+                    } else {
+                        // 重置计数器
+                        tech_pvt->interrupt_count = 1;
+                    }
+                    tech_pvt->last_interrupt_time = now;
+                    
+                    // 清空播放缓冲区
                     switch_buffer_zero(tech_pvt->play_buffer);
+                    
+                    // 重置播放状态
+                    tech_pvt->last_buffer_inuse = 0;
+                    
                     switch_mutex_unlock(tech_pvt->play_mutex);
                     
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                        "(%s) 播放缓冲区已清空，语音流已打断\n", m_sessionId.c_str());
+                        "(%s) 播放已打断，清空缓冲区 %.2f ms (%.2f KB)，准备接收新音频\n",
+                        m_sessionId.c_str(), buffer_ms, buffer_inuse / 1024.0);
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                        "(%s) 无法打断播放：tech_pvt 或 play_buffer 为空\n", m_sessionId.c_str());
                 }
+            } else {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                    "(%s) 无法打断播放：media bug 未找到\n", m_sessionId.c_str());
             }
             
             cJSON_Delete(json);
@@ -876,6 +933,9 @@ namespace {
         // 默认启用流式播放
         tech_pvt->stream_play_enabled = 1;
         tech_pvt->play_thread_running = 0;
+        tech_pvt->last_buffer_inuse = 0;
+        tech_pvt->interrupt_count = 0;
+        tech_pvt->last_interrupt_time = 0;
 
         tech_pvt->write_frame_data = (uint8_t*)switch_core_session_alloc(session, SWITCH_RECOMMENDED_BUFFER_SIZE);
         if (!tech_pvt->write_frame_data) {
@@ -971,9 +1031,6 @@ extern "C" {
         }
         
         if (!tech_pvt->stream_play_enabled) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame: stream_play_enabled is 0\n",
-                              tech_pvt->sessionId);
             return;
         }
 
@@ -987,9 +1044,6 @@ extern "C" {
             out_frame = &tech_pvt->write_frame;
         }
         if (!out_frame->data || !out_frame->buflen) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) stream_play_frame: no valid write_replace_frame buffer\n",
-                              tech_pvt->sessionId);
             return;
         }
 
@@ -1031,14 +1085,15 @@ extern "C" {
             out_frame->rate = tech_pvt->sampling;        // 通话采样率
             out_frame->channels = tech_pvt->channels;    // 通话声道数
 
-            // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-            //                   "(%s) 注入音频: %u samples @ %d Hz | 缓冲区剩余: %.2f ms\n",
-            //                   tech_pvt->sessionId,
-            //                  out_frame->samples,
-            //                  out_frame->rate,
-            //                  (double)switch_buffer_inuse(tech_pvt->play_buffer) /
-            //                  (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0);
+            // 更新上次缓冲区大小（使用 tech_pvt 成员变量，避免静态变量问题）
+            tech_pvt->last_buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+        } else if (tech_pvt->last_buffer_inuse > 0) {
+            // 缓冲区从有数据变为空，表示播放结束
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                              "(%s) 音频播放完成，缓冲区已空\n", tech_pvt->sessionId);
+            tech_pvt->last_buffer_inuse = 0;
         }
+        
         switch_mutex_unlock(tech_pvt->play_mutex);
 
         if (!injected) {

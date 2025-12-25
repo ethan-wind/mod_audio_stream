@@ -39,6 +39,9 @@ struct private_data {
     switch_frame_t write_frame;        // WRITE_REPLACE 输出帧
     uint8_t *write_frame_data;         // WRITE_REPLACE 帧缓冲
     uint64_t play_frame_count;         // 播放帧计数器（用于速率控制）
+    size_t last_buffer_inuse;          // 上次缓冲区大小（用于检测播放结束）
+    uint32_t interrupt_count;          // 打断计数器（用于检测频繁打断）
+    switch_time_t last_interrupt_time; // 上次打断时间
     
     // 播放线程支持
     switch_thread_t *play_thread;      // 播放线程

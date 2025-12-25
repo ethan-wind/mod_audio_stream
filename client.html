@@ -1,0 +1,537 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <title>Voicebot WebSocket 客户端</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: rgba(255, 255, 255, 0.9);
+      --border: rgba(15, 23, 42, 0.1);
+      --muted: #5f6a86;
+      --text: #0f172a;
+      --accent: #0ea5e9;
+      --accent-2: #f59e0b;
+      --error: #e11d48;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      font-family: "DM Sans", "SF Pro Rounded", "PingFang SC", "Noto Sans", sans-serif;
+      background:
+        radial-gradient(circle at 18% 20%, rgba(14, 165, 233, 0.18), transparent 26%),
+        radial-gradient(circle at 82% 12%, rgba(245, 158, 11, 0.16), transparent 24%),
+        radial-gradient(circle at 50% 80%, rgba(16, 185, 129, 0.12), transparent 28%),
+        var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+    .page {
+      max-width: 1080px;
+      margin: 0 auto;
+      padding: 32px 20px 48px;
+    }
+    .hero {
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.16), rgba(245, 158, 11, 0.18));
+      border: 1px solid var(--border);
+      border-radius: 18px;
+      padding: 20px 22px;
+      box-shadow: 0 20px 50px rgba(15, 23, 42, 0.18);
+    }
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      padding: 6px 10px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.08);
+      color: var(--muted);
+      font-size: 12px;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+    h1 {
+      margin: 10px 0 6px;
+      font-size: 26px;
+      letter-spacing: 0.02em;
+    }
+    .hero p {
+      margin: 0;
+      color: var(--muted);
+    }
+    .main-grid {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+      margin-top: 18px;
+    }
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 16px;
+      padding: 18px;
+      box-shadow: 0 16px 36px rgba(15, 23, 42, 0.16);
+      backdrop-filter: blur(2px);
+    }
+    .section-title {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      letter-spacing: 0.01em;
+    }
+    .section-title::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 3px;
+      background: linear-gradient(135deg, var(--accent), var(--accent-2));
+    }
+    label {
+      display: block;
+      color: var(--muted);
+      margin-top: 12px;
+      font-size: 14px;
+    }
+    .input-row {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      margin-top: 8px;
+      flex-wrap: wrap;
+    }
+    input {
+      flex: 1;
+      padding: 12px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--text);
+      outline: none;
+      transition: border 0.2s ease, box-shadow 0.2s ease;
+    }
+    input:focus {
+      border-color: rgba(14, 165, 233, 0.6);
+      box-shadow: 0 8px 20px rgba(14, 165, 233, 0.12);
+    }
+    .controls {
+      display: flex;
+      gap: 10px;
+      margin: 16px 0 12px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      cursor: pointer;
+      padding: 10px 14px;
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      background: rgba(14, 165, 233, 0.08);
+      color: var(--text);
+      font-weight: 600;
+      letter-spacing: 0.01em;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border 0.18s ease;
+    }
+    .btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
+      transform: none;
+      box-shadow: none;
+    }
+    .btn:not(:disabled):hover {
+      transform: translateY(-1px);
+      box-shadow: 0 12px 22px rgba(0, 0, 0, 0.28);
+    }
+    .btn.primary {
+      background: linear-gradient(135deg, rgba(14, 165, 233, 0.92), rgba(16, 185, 129, 0.92));
+      border: none;
+      color: #06263c;
+    }
+    .btn.ghost {
+      border: 1px solid rgba(15, 23, 42, 0.12);
+      background: #ffffff;
+      color: var(--text);
+    }
+    .status-line {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+      justify-content: space-between;
+      flex-wrap: wrap;
+    }
+    #status {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.06);
+      color: var(--text);
+      font-weight: 600;
+      min-width: 110px;
+      justify-content: center;
+      border: 1px solid var(--border);
+    }
+    #status::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      background: var(--muted);
+      box-shadow: 0 0 0 6px rgba(255, 255, 255, 0.04);
+    }
+    #status[data-state="connected"] {
+      background: rgba(14, 165, 233, 0.18);
+      color: #0b4978;
+      border-color: rgba(14, 165, 233, 0.6);
+    }
+    #status[data-state="connected"]::before { background: var(--accent); }
+    #status[data-state="error"] {
+      background: rgba(244, 63, 94, 0.16);
+      color: #8f0b28;
+      border-color: rgba(225, 29, 72, 0.5);
+    }
+    #status[data-state="error"]::before { background: var(--error); }
+    #status[data-state="closed"],
+    #status[data-state="idle"] {
+      background: rgba(255, 255, 255, 0.05);
+      color: var(--muted);
+    }
+    .pill {
+      padding: 8px 12px;
+      border-radius: 12px;
+      background: rgba(14, 165, 233, 0.08);
+      color: var(--text);
+      font-weight: 600;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      border: 1px solid var(--border);
+    }
+    #asrText {
+      color: var(--text);
+      font-weight: 700;
+    }
+    #log {
+      height: 400px;
+      overflow: auto;
+      border-radius: 14px;
+      padding: 12px;
+      white-space: pre-wrap;
+      background: #f0f4ff;
+      border: 1px solid var(--border);
+      font-family: "SFMono-Regular", Menlo, Consolas, "Liberation Mono", monospace;
+      color: #0f172a;
+      box-shadow: inset 0 1px 0 rgba(15, 23, 42, 0.04);
+      font-size: 13px;
+      line-height: 1.5;
+    }
+    @media (max-width: 640px) {
+      .controls { width: 100%; }
+      .btn { flex: 1; text-align: center; }
+      #status { width: 100%; justify-content: center; }
+      .status-line { gap: 8px; }
+    }
+  </style>
+</head>
+<body>
+  <div class="page">
+    <section class="hero">
+      <div class="eyebrow">实时对话</div>
+      <h1>Voicebot WebSocket 客户端</h1>
+      <p>连接服务、推送音频并实时查看 ASR/TTS 流。保持浏览器打开即可持续监听。</p>
+    </section>
+
+    <main class="main-grid">
+      <section class="card">
+        <div class="section-title">连接参数</div>
+        <label for="wsUrl">WebSocket URL</label>
+        <div class="input-row">
+          <input id="wsUrl" value="ws://localhost:18080/v1/ws?accountId=5368&customerNumber=18780969628&callUniqueId=1014357372299382784&robotId=67c6e00a6f06496a17b08328&robotType=outbound&callType=voiceBotIn" placeholder="ws://hostname:port/v1/ws">
+        </div>
+        <div class="controls">
+          <button class="btn primary" id="connectBtn">连接并开始说话</button>
+          <button class="btn ghost" id="stopBtn" disabled>停止</button>
+        </div>
+        <div class="status-line">
+          <span id="status" data-state="idle">未连接</span>
+          <span class="pill">ASR <span id="asrText">-</span></span>
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="section-title">流日志</div>
+        <div id="log"></div>
+      </section>
+    </main>
+  </div>
+
+  <script>
+    const statusEl = document.getElementById('status');
+    const logEl = document.getElementById('log');
+    const asrEl = document.getElementById('asrText');
+    const wsUrlInput = document.getElementById('wsUrl');
+    const connectBtn = document.getElementById('connectBtn');
+    const stopBtn = document.getElementById('stopBtn');
+
+    let ws;
+    let audioCtx;
+    let playbackAudioCtx;  // 用于播放 TTS 音频
+    let mediaStream;
+    let processor;
+    let source;
+    const targetSampleRate = 8000;  // ASR 输入采样率
+    const ttsSampleRate = 8000;     // TTS 输出采样率
+    
+    // 音频播放队列和状态
+    let audioQueue = [];
+    let isPlaying = false;
+    let nextStartTime = 0;
+    let scheduledSources = []; // 已调度但未播放完的音频源
+
+    function log(msg) {
+      const line = `[${new Date().toLocaleTimeString()}] ${msg}\n`;
+      logEl.textContent += line;
+      logEl.scrollTop = logEl.scrollHeight;
+    }
+
+    function setStatus(text, state = 'idle') {
+      statusEl.textContent = text;
+      statusEl.dataset.state = state;
+    }
+
+    function downsampleAndEncode(buffer, inputSampleRate) {
+      const sampleRatio = inputSampleRate / targetSampleRate;
+      const outputLength = Math.floor(buffer.length / sampleRatio);
+      const output = new Int16Array(outputLength);
+      for (let i = 0; i < outputLength; i++) {
+        const idx = Math.floor(i * sampleRatio);
+        let s = buffer[idx] || 0;
+        s = Math.max(-1, Math.min(1, s));
+        output[i] = s < 0 ? s * 0x8000 : s * 0x7fff;
+      }
+      return output.buffer;
+    }
+
+    function floatToPcmBuffer(int16) {
+      // 使用浏览器默认采样率的 AudioContext
+      if (!playbackAudioCtx) {
+        playbackAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        log(`播放 AudioContext 采样率: ${playbackAudioCtx.sampleRate}Hz`);
+        nextStartTime = playbackAudioCtx.currentTime;
+      }
+      
+      // 创建 AudioBuffer，指定原始采样率为 ttsSampleRate
+      const audioBuffer = playbackAudioCtx.createBuffer(1, int16.length, ttsSampleRate);
+      const channelData = audioBuffer.getChannelData(0);
+      for (let i = 0; i < int16.length; i++) {
+        channelData[i] = int16[i] / 0x8000;
+      }
+      
+      // 添加到队列
+      audioQueue.push(audioBuffer);
+      
+      // 立即调度播放（不等待前一个播放完）
+      scheduleNextAudio();
+    }
+    
+    function scheduleNextAudio() {
+      if (audioQueue.length === 0) {
+        return;
+      }
+      
+      // 初始化播放状态
+      if (!isPlaying) {
+        isPlaying = true;
+        nextStartTime = playbackAudioCtx.currentTime;
+      }
+      
+      // 批量调度所有待播放的音频
+      while (audioQueue.length > 0) {
+        const audioBuffer = audioQueue.shift();
+        
+        // 计算开始时间（确保无缝衔接）
+        const currentTime = playbackAudioCtx.currentTime;
+        const startTime = Math.max(currentTime, nextStartTime);
+        
+        // 创建音频源
+        const src = playbackAudioCtx.createBufferSource();
+        src.buffer = audioBuffer;
+        src.connect(playbackAudioCtx.destination);
+        
+        // 记录已调度的音频源
+        scheduledSources.push(src);
+        
+        // 设置结束回调
+        src.onended = () => {
+          // 从已调度列表中移除
+          const index = scheduledSources.indexOf(src);
+          if (index > -1) {
+            scheduledSources.splice(index, 1);
+          }
+          
+          // 如果没有更多音频，标记播放结束
+          if (scheduledSources.length === 0 && audioQueue.length === 0) {
+            isPlaying = false;
+            log('所有音频播放完成');
+          }
+        };
+        
+        // 开始播放
+        src.start(startTime);
+        
+        // 更新下次开始时间（紧密衔接，无间隙）
+        nextStartTime = startTime + audioBuffer.duration;
+        
+        log(`调度音频: ${audioBuffer.length} 样本, 时长: ${audioBuffer.duration.toFixed(3)}s, 开始: ${startTime.toFixed(3)}s, 队列: ${audioQueue.length}, 已调度: ${scheduledSources.length}`);
+      }
+    }
+    
+    function clearAudioQueue() {
+      log(`清空音频队列，当前队列长度: ${audioQueue.length}, 已调度: ${scheduledSources.length}`);
+      
+      // 停止所有已调度的音频源
+      scheduledSources.forEach(src => {
+        try {
+          src.stop();
+          src.disconnect();
+        } catch (e) {
+          // 音频可能已经结束，忽略错误
+        }
+      });
+      scheduledSources = [];
+      
+      // 清空队列
+      audioQueue = [];
+      isPlaying = false;
+      
+      // 重置下次开始时间为当前时间
+      if (playbackAudioCtx) {
+        nextStartTime = playbackAudioCtx.currentTime;
+      }
+      
+      log('音频队列已清空，所有播放已停止');
+    }
+
+    async function startCapture() {
+      audioCtx = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: targetSampleRate });
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      source = audioCtx.createMediaStreamSource(mediaStream);
+      processor = audioCtx.createScriptProcessor(4096, 1, 1);
+      processor.onaudioprocess = (e) => {
+        if (!ws || ws.readyState !== WebSocket.OPEN) return;
+        const input = e.inputBuffer.getChannelData(0);
+        const buffer = downsampleAndEncode(input, audioCtx.sampleRate);
+        ws.send(buffer);
+      };
+      source.connect(processor);
+      processor.connect(audioCtx.destination);
+    }
+
+    function stopCapture() {
+      if (processor) {
+        processor.disconnect();
+        processor.onaudioprocess = null;
+        processor = null;
+      }
+      if (source) {
+        source.disconnect();
+        source = null;
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach(t => t.stop());
+        mediaStream = null;
+      }
+      if (audioCtx) {
+        audioCtx.close();
+        audioCtx = null;
+      }
+      if (playbackAudioCtx) {
+        playbackAudioCtx.close();
+        playbackAudioCtx = null;
+      }
+      // 清空音频队列
+      audioQueue = [];
+      isPlaying = false;
+      nextStartTime = 0;
+    }
+
+    function setupWebSocket(url) {
+      ws = new WebSocket(url);
+      ws.binaryType = 'arraybuffer';
+
+      ws.onopen = () => {
+        setStatus('已连接，开始录音发送...', 'connected');
+        log('WebSocket 已连接');
+        stopBtn.disabled = false;
+        connectBtn.disabled = true;
+        startCapture().catch(err => {
+          log('获取麦克风失败: ' + err);
+          setStatus('录音失败', 'error');
+        });
+      };
+
+      ws.onmessage = (event) => {
+        if (typeof event.data === 'string') {
+          // 尝试解析 JSON 命令
+          try {
+            const jsonData = JSON.parse(event.data);
+            if (jsonData.action === 'stop_playback') {
+              log('收到停止播放命令: ' + jsonData.reason);
+              clearAudioQueue();
+              log('停止播放命令处理完成，准备接收新音频');
+              return;
+            }
+          } catch (e) {
+            // 不是 JSON，当作普通文本处理
+          }
+          
+          log('收到文本: ' + event.data);
+          asrEl.textContent = event.data;
+          return;
+        }
+        // 收到二进制音频数据（TTS 返回的 PCM）
+        const data = new Int16Array(event.data);
+        if (data.length === 0) {
+          log('收到空音频数据');
+          return;
+        }
+        log(`收到音频数据: ${data.length} 样本，当前队列长度: ${audioQueue.length}，isPlaying: ${isPlaying}`);
+        floatToPcmBuffer(data);
+      };
+
+      ws.onerror = (err) => {
+        log('WebSocket 错误: ' + err.message);
+        setStatus('连接错误', 'error');
+      };
+
+      ws.onclose = () => {
+        log('WebSocket 已关闭');
+        setStatus('连接已关闭', 'closed');
+        stopBtn.disabled = true;
+        connectBtn.disabled = false;
+        stopCapture();
+      };
+    }
+
+    connectBtn.onclick = () => {
+      const url = wsUrlInput.value.trim();
+      if (!url) {
+        alert('请输入 WebSocket URL');
+        return;
+      }
+      setStatus('正在连接...', 'connecting');
+      setupWebSocket(url);
+    };
+
+    stopBtn.onclick = () => {
+      if (ws && ws.readyState === WebSocket.OPEN) {
+        ws.send('stop');
+        ws.close();
+      }
+      stopCapture();
+      setStatus('已停止', 'idle');
+    };
+  </script>
+</body>
+</html>
