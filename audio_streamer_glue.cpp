@@ -687,28 +687,39 @@ public:
                             //
                             // 此格式可直接被 FreeSWitch WRITE_REPLACE 使用
                             
+                            uint64_t current_sequence = m_current_audio_sequence.load(std::memory_order_acquire);
                             switch_mutex_lock(tech_pvt->play_mutex);
-                            size_t data_size = playbackSamples.size() * sizeof(int16_t);
-                            size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
-                            
-                            if (available >= data_size) {
-                                // 写入 16-bit Linear PCM 数据到播放缓冲区
-                                // FreeSWitch 会在 WRITE_REPLACE 回调中读取并自动编码
-                                size_t written = switch_buffer_write(tech_pvt->play_buffer,
-                                                   (uint8_t*)playbackSamples.data(),
-                                                   data_size);
-                                
-                                size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
-                                double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
-                                
-                            } else {
-                                size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
-                                double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+                            if (current_sequence != tech_pvt->audio_sequence) {
+                                switch_mutex_unlock(tech_pvt->play_mutex);
                                 switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
-                                    "(%s) 播放缓冲区已满 (%.2f ms)，丢弃 %zu samples\n",
-                                    m_sessionId.c_str(), buffer_ms, playbackSamples.size());
+                                    "(%s) 丢弃旧音频数据 %zu bytes (序列号不匹配: %llu vs %llu)\n",
+                                    m_sessionId.c_str(),
+                                    playbackSamples.size() * sizeof(int16_t),
+                                    (unsigned long long)current_sequence,
+                                    (unsigned long long)tech_pvt->audio_sequence);
+                            } else {
+                                size_t data_size = playbackSamples.size() * sizeof(int16_t);
+                                size_t available = switch_buffer_freespace(tech_pvt->play_buffer);
+                                
+                                if (available >= data_size) {
+                                    // 写入 16-bit Linear PCM 数据到播放缓冲区
+                                    // FreeSWitch 会在 WRITE_REPLACE 回调中读取并自动编码
+                                    size_t written = switch_buffer_write(tech_pvt->play_buffer,
+                                                       (uint8_t*)playbackSamples.data(),
+                                                       data_size);
+                                    
+                                    size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+                                    double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+                                    
+                                } else {
+                                    size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+                                    double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+                                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                        "(%s) 播放缓冲区已满 (%.2f ms)，丢弃 %zu samples\n",
+                                        m_sessionId.c_str(), buffer_ms, playbackSamples.size());
+                                }
+                                switch_mutex_unlock(tech_pvt->play_mutex);
                             }
-                            switch_mutex_unlock(tech_pvt->play_mutex);
                         }
                         
                         std::vector<int16_t> outputSamples;
