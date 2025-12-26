@@ -919,8 +919,8 @@ namespace {
             return SWITCH_STATUS_FALSE;
         }
         
-        // 初始化播放缓冲区（30秒缓冲，用于流式播放，防止突发音频丢失）
-        const size_t play_buflen = sampling * channels * sizeof(int16_t) * 30;
+        // 初始化播放缓冲区（300秒缓冲，用于流式播放，防止突发音频丢失）
+        const size_t play_buflen = sampling * channels * sizeof(int16_t) * 300;
         if (switch_buffer_create(pool, &tech_pvt->play_buffer, play_buflen) != SWITCH_STATUS_SUCCESS) {
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
                 "%s: Error creating play buffer.\n", tech_pvt->sessionId);
