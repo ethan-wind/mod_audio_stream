@@ -1093,9 +1093,19 @@ extern "C" {
             tech_pvt->last_buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
         } else if (tech_pvt->last_buffer_inuse > 0) {
             // 缓冲区从有数据变为空，表示播放结束
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                               "(%s) 音频播放完成，缓冲区已空\n", tech_pvt->sessionId);
             tech_pvt->last_buffer_inuse = 0;
+            
+            // 发送播放完成消息给WebSocket服务端
+            auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+            if (pAudioStreamer && pAudioStreamer->isConnected()) {
+                const char* playback_ended_msg = "{\"action\":\"voice_playback_ended\"}";
+                pAudioStreamer->writeText(playback_ended_msg);
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) 已发送播放完成消息: %s\n", 
+                                  tech_pvt->sessionId, playback_ended_msg);
+            }
         }
         
         switch_mutex_unlock(tech_pvt->play_mutex);
