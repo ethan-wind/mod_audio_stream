@@ -1035,6 +1035,9 @@ extern "C" {
         }
         
         if (!tech_pvt->stream_play_enabled) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
+                              "(%s) stream_play_frame: stream_play_enabled=0, 跳过\n",
+                              tech_pvt->sessionId);
             return;
         }
 
@@ -1091,26 +1094,42 @@ extern "C" {
 
             // 更新上次缓冲区大小（使用 tech_pvt 成员变量，避免静态变量问题）
             tech_pvt->last_buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
-        } else if (tech_pvt->last_buffer_inuse > 0) {
-            // 缓冲区从有数据变为空，表示播放结束
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                "(%s) 音频播放完成，缓冲区已空\n", tech_pvt->sessionId);
-            tech_pvt->last_buffer_inuse = 0;
+        } else {
+            // 缓冲区为空
+            if (tech_pvt->last_buffer_inuse > 0) {
+                // 缓冲区从有数据变为空，表示播放结束
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) 音频播放完成，缓冲区已空\n", tech_pvt->sessionId);
+                tech_pvt->last_buffer_inuse = 0;
+                
+                // 发送播放完成消息给WebSocket服务端
+                auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+                if (pAudioStreamer) {
+                    if (pAudioStreamer->isConnected()) {
+                        const char* playback_ended_msg = "{\"action\":\"voice_playback_ended\"}";
+                        pAudioStreamer->writeText(playback_ended_msg);
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                          "(%s) 已发送播放完成消息: %s\n", 
+                                          tech_pvt->sessionId, playback_ended_msg);
+                    } else {
+                        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                          "(%s) WebSocket未连接，无法发送播放完成消息\n", 
+                                          tech_pvt->sessionId);
+                    }
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                                      "(%s) pAudioStreamer为空，无法发送播放完成消息\n", 
+                                      tech_pvt->sessionId);
+                }
+            }
         }
     
+        switch_mutex_unlock(tech_pvt->play_mutex);
 
         if (!injected) {
-            // 发送播放完成消息给WebSocket服务端
-            auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
-            if (pAudioStreamer && pAudioStreamer->isConnected()) {
-                const char* playback_ended_msg = "{\"action\":\"voice_playback_ended\"}";
-                pAudioStreamer->writeText(playback_ended_msg);
-            }
             // 缓冲区为空，不替换音频，保持原始通话音频透传
             return;
         }
-
-        switch_mutex_unlock(tech_pvt->play_mutex);
         
         // 设置替换帧，让本次写方向（播放给线路）使用我们准备的音频
         // FreeSWitch 会自动处理后续的编码 (G.711/Opus/etc.)
