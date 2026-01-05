@@ -300,18 +300,21 @@ public:
                 switch_buffer_write(tech_pvt->play_buffer,
                                    data.data(),
                                    data_size);
-                
+
                 // 计算缓冲区时长（毫秒）
                 size_t new_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
-                double buffer_ms = (double)new_inuse / 
+                double buffer_ms = (double)new_inuse /
                                   (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
-                
+
+                // 更新 last_buffer_inuse，用于检测播放结束
+                tech_pvt->last_buffer_inuse = new_inuse;
+
                 // 只在缓冲区从空变为有数据时记录日志（表示新音频流开始）
                 if (buffer_inuse == 0 && new_inuse > 0) {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
                         "(%s) 开始播放新音频流，缓冲区: %.2f ms (打断计数: %u)\n",
                         m_sessionId.c_str(), buffer_ms, tech_pvt->interrupt_count);
-                    
+
                     // 重置打断计数器（新音频流开始）
                     if (switch_time_now() - tech_pvt->last_interrupt_time > 2000000) {  // 2秒后重置
                         tech_pvt->interrupt_count = 0;
