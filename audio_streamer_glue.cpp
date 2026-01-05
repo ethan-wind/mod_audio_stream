@@ -674,10 +674,13 @@ public:
                                 size_t written = switch_buffer_write(tech_pvt->play_buffer,
                                                    (uint8_t*)playbackSamples.data(),
                                                    data_size);
-                                
+
                                 size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
-                                
+
+                                // 更新 last_buffer_inuse，用于检测播放结束
+                                tech_pvt->last_buffer_inuse = buffer_inuse;
+
                             } else {
                                 size_t buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
                                 double buffer_ms = (double)buffer_inuse / (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
