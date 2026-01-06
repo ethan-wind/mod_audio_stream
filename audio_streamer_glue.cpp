@@ -1119,11 +1119,6 @@ extern "C" {
         switch_mutex_unlock(tech_pvt->play_mutex);
 
         if (playback_ended) {
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                              "(%s) 音频播放完成，缓冲区已空\n", tech_pvt->sessionId);
-            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_DEBUG,
-                              "(%s) 播放缓冲区耗尽: before=%zu bytes, read=%zu bytes, target=%zu bytes\n",
-                              tech_pvt->sessionId, start_inuse, read_size, target_bytes);
 
             // 发送播放完成消息给WebSocket服务端
             auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
@@ -1131,9 +1126,6 @@ extern "C" {
                 if (pAudioStreamer->isConnected()) {
                     const char* playback_ended_msg = "{\"action\":\"voice_playback_ended\"}";
                     pAudioStreamer->writeText(playback_ended_msg);
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
-                                      "(%s) 已发送播放完成消息: %s\n",
-                                      tech_pvt->sessionId, playback_ended_msg);
                 } else {
                     switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
                                       "(%s) WebSocket未连接，无法发送播放完成消息\n",
