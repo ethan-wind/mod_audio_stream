@@ -1272,7 +1272,7 @@ extern "C" {
         bool suppressLog = false;
         const char* buffer_size;
         const char* extra_headers;
-        int rtp_packets = 1; //20ms burst
+        int rtp_packets = 10; //200ms burst (10 * 20ms)
         bool no_reconnect = false;
         const char* tls_cafile = NULL;;
         const char* tls_keyfile = NULL;;
