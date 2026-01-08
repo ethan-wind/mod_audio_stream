@@ -848,7 +848,12 @@ public:
     }
 
     void writeBinary(uint8_t* buffer, size_t len) {
-        if(!this->isConnected()) return;
+        if(!this->isConnected()) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "(%s) writeBinary 失败: WebSocket 未连接，丢弃 %zu 字节音频数据\n",
+                m_sessionId.c_str(), len);
+            return;
+        }
         client.sendBinary(buffer, len);
     }
 
@@ -1343,20 +1348,13 @@ extern "C" {
     switch_bool_t stream_frame(switch_media_bug_t *bug) {
         auto *tech_pvt = (private_t *)switch_core_media_bug_get_user_data(bug);
         if (!tech_pvt || tech_pvt->audio_paused) return SWITCH_TRUE;
-        /*
-        auto flush_sbuffer = [&]() {
-            switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
-            if (inuse > 0) {
-                std::vector<uint8_t> tmp(inuse);
-                switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                switch_buffer_zero(tech_pvt->sbuffer);
-                pAudioStreamer->writeBinary(tmp.data(), inuse);
-            }
-        };
-        */
+        
         if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
 
             if (!tech_pvt->pAudioStreamer) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "(%s) stream_frame: pAudioStreamer 为空，跳过本次音频帧\n",
+                    tech_pvt->sessionId);
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_TRUE;
             }
@@ -1364,6 +1362,9 @@ extern "C" {
             auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
 
             if (!pAudioStreamer->isConnected()) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "(%s) stream_frame: WebSocket 未连接，跳过音频帧\n",
+                    tech_pvt->sessionId);
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_TRUE;
             }
@@ -1378,12 +1379,16 @@ extern "C" {
 
                 while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
                     if (frame.datalen) {
-                        if (1 == tech_pvt->rtp_packets) {
+                        if (10 == tech_pvt->rtp_packets) {
                             pAudioStreamer->writeBinary((uint8_t *) frame.data, frame.datalen);
                             continue;
                         }
                         if (available >= frame.datalen) {
                             switch_buffer_write(tech_pvt->sbuffer, static_cast<uint8_t *>(frame.data), frame.datalen);
+                        } else {
+                            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                                "(%s) stream_frame: 缓冲区空间不足，丢弃 %u 字节音频帧 (可用: %zu, 需要: %u)\n",
+                                tech_pvt->sessionId, frame.datalen, available, frame.datalen);
                         }
                         if (0 == switch_buffer_freespace(tech_pvt->sbuffer)) {
                             switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
@@ -1434,6 +1439,16 @@ extern "C" {
                             }
                             if (bytes_written <= available) {
                                 switch_buffer_write(tech_pvt->sbuffer, (const uint8_t *)out, bytes_written);
+                            } else {
+                                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                                    "(%s) stream_frame: 重采样后缓冲区空间不足，丢弃 %zu 字节 (可用: %zu)\n",
+                                    tech_pvt->sessionId, bytes_written, available);
+                            }
+                        } else {
+                            if (in_len > 0) {  // 只在有输入但无输出时记录
+                                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                                    "(%s) stream_frame: 重采样输出为空 (输入样本: %u)\n",
+                                    tech_pvt->sessionId, in_len);
                             }
                         }
 
@@ -1451,6 +1466,10 @@ extern "C" {
             }
             
             switch_mutex_unlock(tech_pvt->mutex);
+        } else {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                "(%s) stream_frame: 获取 mutex 锁失败，跳过音频帧\n",
+                tech_pvt->sessionId);
         }
 
         return SWITCH_TRUE;
