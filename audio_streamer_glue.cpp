@@ -411,6 +411,34 @@ public:
             cJSON_Delete(json);
             return SWITCH_TRUE;
         }
+
+        // 处理 dtmf 消息
+        if (jsAction && strcmp(jsAction, "dtmf") == 0) {
+            const char* jsNodeConfig = cJSON_GetObjectCstr(json, "nodeConfig");
+
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                "(%s) 收到 dtmf 消息，nodeConfig: %s\n",
+                m_sessionId.c_str(),
+                jsNodeConfig ? jsNodeConfig : "未指定");
+
+            // 抛出自定义 dtmf 事件给 ESL
+            switch_event_t *event = NULL;
+            if (switch_event_create(&event, SWITCH_EVENT_CUSTOM) == SWITCH_STATUS_SUCCESS) {
+                switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Event-Subclass", "audio_stream");
+                switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "dtmf");
+                switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Channel-Call-UUID", m_sessionId.c_str());
+                if (jsNodeConfig) {
+                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "nodeConfig", jsNodeConfig);
+                }
+                switch_event_fire(&event);
+
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                    "(%s) dtmf 事件已抛出\n", m_sessionId.c_str());
+            }
+
+            cJSON_Delete(json);
+            return SWITCH_TRUE;
+        }
         
         // 处理 stop_playback 消息（语音打断）
         if (jsAction && strcmp(jsAction, "stop_playback") == 0) {
