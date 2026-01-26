@@ -351,6 +351,7 @@ public:
             const char* jsAccountId = cJSON_GetObjectCstr(json, "accountId");
             const char* jsCustomerNumber = cJSON_GetObjectCstr(json, "customerNumber");
             const char* jsCallUniqueId = cJSON_GetObjectCstr(json, "callUniqueId");
+            const char* jsTrunkNumber = cJSON_GetObjectCstr(json, "trunkNumber");
             
             switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
                 "(%s) 收到 turnHuman 消息，serviceNumber: %s, accountId: %s, customerNumber: %s\n",
@@ -375,6 +376,9 @@ public:
                 }
                 if (jsCallUniqueId) {
                     switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "CallUniqueId", jsCallUniqueId);
+                }
+                if (jsTrunkNumber) {
+                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "TrunkNumber", jsTrunkNumber);
                 }
                 switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Channel-Call-UUID", m_sessionId.c_str());
                 switch_event_fire(&event);
