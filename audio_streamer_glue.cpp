@@ -432,7 +432,7 @@ public:
                 switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Action", "dtmf");
                 switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "Channel-Call-UUID", m_sessionId.c_str());
                 if (jsNodeConfig) {
-                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "nodeConfig", jsNodeConfig);
+                    switch_event_add_header_string(event, SWITCH_STACK_BOTTOM, "NodeConfig", jsNodeConfig);
                 }
                 switch_event_fire(&event);
 
