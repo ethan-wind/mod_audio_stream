@@ -1124,13 +1124,26 @@ extern "C" {
                 read_size = inuse;
             }
 
-            // 从缓冲区读取 16-bit Linear PCM 数据 (小端序)
-            switch_buffer_read(tech_pvt->play_buffer, out_frame->data, read_size);
+            // 保存原始帧数据（背景音），用于后续混音
+            // 临时缓冲区大小与帧一致
+            uint8_t tts_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
+            memset(tts_buf, 0, target_bytes);
+
+            // 从缓冲区读取 TTS 的 16-bit Linear PCM 数据
+            switch_buffer_read(tech_pvt->play_buffer, tts_buf, read_size);
             injected = true;
 
-            // 如果数据不足一帧，用静音填充 (0x0000 = 静音)
-            if (read_size < target_bytes) {
-                memset((uint8_t*)out_frame->data + read_size, 0, target_bytes - read_size);
+            // 将 TTS 音频与原始帧（背景音）做饱和混音
+            // 原始帧已包含 playback 注入的背景音
+            int16_t *bg  = (int16_t *)out_frame->data;
+            int16_t *tts = (int16_t *)tts_buf;
+            size_t num_samples = target_bytes / sizeof(int16_t);
+            for (size_t i = 0; i < num_samples; i++) {
+                int32_t mixed = (int32_t)bg[i] + (int32_t)tts[i];
+                // 饱和截断，防止溢出
+                if (mixed > 32767)  mixed = 32767;
+                if (mixed < -32768) mixed = -32768;
+                bg[i] = (int16_t)mixed;
             }
 
             // 设置帧参数 (FreeSWitch 播放格式)
