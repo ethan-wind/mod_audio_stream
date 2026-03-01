@@ -36,6 +36,7 @@ struct private_data {
     switch_buffer_t *play_buffer;      // 播放缓冲区
     switch_mutex_t *play_mutex;        // 播放互斥锁
     int stream_play_enabled:1;         // 启用流式播放
+    int playback_paused:1;             // 下行播放暂停标记（仅暂停缓冲区读取）
     switch_frame_t write_frame;        // WRITE_REPLACE 输出帧
     uint8_t *write_frame_data;         // WRITE_REPLACE 帧缓冲
     uint64_t play_frame_count;         // 播放帧计数器（用于速率控制）

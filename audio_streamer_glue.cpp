@@ -443,6 +443,45 @@ public:
             cJSON_Delete(json);
             return SWITCH_TRUE;
         }
+
+        // 处理 pause_playback / resume_playback（暂停或恢复当前播放缓冲区）
+        if (jsAction && (strcmp(jsAction, "pause_playback") == 0 || strcmp(jsAction, "resume_playback") == 0)) {
+            const bool pause_playback = (strcmp(jsAction, "pause_playback") == 0);
+            const char* jsReason = cJSON_GetObjectCstr(json, "reason");
+
+            auto *bug = get_media_bug(session);
+            if (bug) {
+                auto* tech_pvt = (private_t*) switch_core_media_bug_get_user_data(bug);
+                if (tech_pvt && tech_pvt->play_buffer && tech_pvt->play_mutex) {
+                    size_t buffer_inuse = 0;
+                    switch_mutex_lock(tech_pvt->play_mutex);
+                    tech_pvt->playback_paused = pause_playback ? 1 : 0;
+                    buffer_inuse = switch_buffer_inuse(tech_pvt->play_buffer);
+                    switch_mutex_unlock(tech_pvt->play_mutex);
+
+                    double buffer_ms = (double)buffer_inuse /
+                        (tech_pvt->sampling * tech_pvt->channels * sizeof(int16_t)) * 1000.0;
+
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                        "(%s) 收到 %s 消息，reason: %s，缓冲区保留: %.2f ms\n",
+                        m_sessionId.c_str(),
+                        pause_playback ? "pause_playback" : "resume_playback",
+                        jsReason ? jsReason : "未指定",
+                        buffer_ms);
+                } else {
+                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                        "(%s) 无法切换播放暂停状态：tech_pvt 或 play_buffer 为空\n",
+                        m_sessionId.c_str());
+                }
+            } else {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                    "(%s) 无法切换播放暂停状态：media bug 未找到\n",
+                    m_sessionId.c_str());
+            }
+
+            cJSON_Delete(json);
+            return SWITCH_TRUE;
+        }
         
         // 处理 stop_playback 消息（语音打断）
         if (jsAction && strcmp(jsAction, "stop_playback") == 0) {
@@ -482,8 +521,9 @@ public:
                     
                     // 清空播放缓冲区
                     switch_buffer_zero(tech_pvt->play_buffer);
-                    
+
                     // 重置播放状态
+                    tech_pvt->playback_paused = 0;
                     tech_pvt->last_buffer_inuse = 0;
                     
                     switch_mutex_unlock(tech_pvt->play_mutex);
@@ -979,6 +1019,7 @@ namespace {
         
         // 默认启用流式播放
         tech_pvt->stream_play_enabled = 1;
+        tech_pvt->playback_paused = 0;
         tech_pvt->play_thread_running = 0;
         tech_pvt->last_buffer_inuse = 0;
         tech_pvt->interrupt_count = 0;
@@ -1115,6 +1156,11 @@ extern "C" {
         size_t read_size = 0;
 
         switch_mutex_lock(tech_pvt->play_mutex);
+        if (tech_pvt->playback_paused) {
+            switch_mutex_unlock(tech_pvt->play_mutex);
+            return;
+        }
+
         size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
         start_inuse = inuse;
 
