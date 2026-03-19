@@ -1500,9 +1500,6 @@ extern "C" {
             auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
 
             if (!pAudioStreamer->isConnected()) {
-                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-                    "(%s) stream_frame: WebSocket 未连接，跳过音频帧\n",
-                    tech_pvt->sessionId);
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_TRUE;
             }
