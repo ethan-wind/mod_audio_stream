@@ -69,7 +69,7 @@ The following channel variables can be used to fine tune websocket connection an
 | STREAM_MESSAGE_DEFLATE                 | true or 1, disables per message deflate                 | off     |
 | STREAM_HEART_BEAT                      | number of seconds, interval to send the heart beat      | off     |
 | STREAM_SUPPRESS_LOG                    | true or 1, suppresses printing to log                   | off     |
-| STREAM_BUFFER_SIZE                     | buffer duration in milliseconds, divisible by 20        | 20      |
+| STREAM_BUFFER_SIZE                     | buffer duration in milliseconds, divisible by 20        | 200     |
 | STREAM_EXTRA_HEADERS                   | JSON object for additional headers in string format     | none    |
 | ~~STREAM_NO_RECONNECT~~                    | true or 1, disables automatic websocket reconnection    | off     |
 | STREAM_TLS_CA_FILE                     | CA cert or bundle, or the special values SYSTEM or NONE | SYSTEM  |
@@ -81,7 +81,7 @@ The following channel variables can be used to fine tune websocket connection an
 - Heart beat, sent every xx seconds when there is no traffic to make sure that load balancers do not kill an idle connection.
 - Suppress parameter is omitted by default(false). All the responses from websocket server will be printed to the log. Not to flood the log you can suppress it by setting the value to `true|1`. Events are fired still, it only affects printing to the log.
 - `Buffer Size` actually represents a duration of audio chunk sent to websocket. If you want to send e.g. 100ms audio packets to your ws endpoint
-you would set this variable to 100. If ommited, default packet size of 20ms will be sent as grabbed from the audio channel (which is default FreeSWITCH frame size)
+you would set this variable to 100. If omitted, default packet size of 200ms will be sent to the websocket endpoint.
 - Extra headers should be a JSON object with key-value pairs representing additional HTTP headers. Each key should be a header name, and its corresponding value should be a string.
   ```json
   {

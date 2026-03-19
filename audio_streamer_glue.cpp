@@ -6,6 +6,7 @@
 #include <switch_json.h>
 #include <fstream>
 #include <switch_buffer.h>
+#include <vector>
 #include <unordered_map>
 #include <unordered_set>
 #include "base64.h"
@@ -960,6 +961,52 @@ extern "C" {
 
 namespace {
 
+    void flush_pending_audio(private_t *tech_pvt, AudioStreamer *audioStreamer) {
+        switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
+        if (inuse == 0) {
+            return;
+        }
+
+        std::vector<uint8_t> chunk(inuse);
+        switch_buffer_read(tech_pvt->sbuffer, chunk.data(), inuse);
+        switch_buffer_zero(tech_pvt->sbuffer);
+        audioStreamer->writeBinary(chunk.data(), inuse);
+    }
+
+    void queue_audio_chunk(private_t *tech_pvt, AudioStreamer *audioStreamer, uint8_t *data, size_t len) {
+        if (tech_pvt->rtp_packets == 1) {
+            audioStreamer->writeBinary(data, len);
+            return;
+        }
+
+        size_t offset = 0;
+        while (offset < len) {
+            size_t free_space = switch_buffer_freespace(tech_pvt->sbuffer);
+            if (free_space == 0) {
+                flush_pending_audio(tech_pvt, audioStreamer);
+                free_space = switch_buffer_freespace(tech_pvt->sbuffer);
+                if (free_space == 0) {
+                    switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                        "(%s) queue_audio_chunk: flush 后缓冲区仍不可写，丢弃 %zu 字节音频数据\n",
+                        tech_pvt->sessionId, len - offset);
+                    break;
+                }
+            }
+
+            size_t write_size = len - offset;
+            if (write_size > free_space) {
+                write_size = free_space;
+            }
+
+            switch_buffer_write(tech_pvt->sbuffer, data + offset, write_size);
+            offset += write_size;
+
+            if (switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
+                flush_pending_audio(tech_pvt, audioStreamer);
+            }
+        }
+    }
+
     switch_status_t stream_data_init(private_t *tech_pvt, switch_core_session_t *session, char *wsUri,
                                      uint32_t sampling, int desiredSampling, int channels, char *metadata, responseHandler_t responseHandler,
                                      int deflate, int heart_beat, bool suppressLog, int rtp_packets, const char* extra_headers,
@@ -1409,7 +1456,7 @@ extern "C" {
         if ((buffer_size = switch_channel_get_variable(channel, "STREAM_BUFFER_SIZE"))) {
             int bSize = atoi(buffer_size);
             if(bSize % 20 != 0) {
-                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "%s: Buffer size of %s is not a multiple of 20ms. Using default 20ms.\n",
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING, "%s: Buffer size of %s is not a multiple of 20ms. Using default 200ms.\n",
                                   switch_channel_get_name(channel), buffer_size);
             } else if(bSize >= 20){
                 rtp_packets = bSize/20;
@@ -1466,30 +1513,10 @@ extern "C" {
                 switch_frame_t frame = {0};
                 frame.data = data_buf;
                 frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                size_t available = switch_buffer_freespace(tech_pvt->sbuffer);
 
                 while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
                     if (frame.datalen) {
-                        if (10 == tech_pvt->rtp_packets) {
-                            pAudioStreamer->writeBinary((uint8_t *) frame.data, frame.datalen);
-                            continue;
-                        }
-                        if (available >= frame.datalen) {
-                            switch_buffer_write(tech_pvt->sbuffer, static_cast<uint8_t *>(frame.data), frame.datalen);
-                        } else {
-                            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-                                "(%s) stream_frame: 缓冲区空间不足，丢弃 %u 字节音频帧 (可用: %zu, 需要: %u)\n",
-                                tech_pvt->sessionId, frame.datalen, available, frame.datalen);
-                        }
-                        if (0 == switch_buffer_freespace(tech_pvt->sbuffer)) {
-                            switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
-                            if (inuse > 0) {
-                                std::vector<uint8_t> tmp(inuse);
-                                switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                                switch_buffer_zero(tech_pvt->sbuffer);
-                                pAudioStreamer->writeBinary(tmp.data(), inuse);
-                            }
-                        }
+                        queue_audio_chunk(tech_pvt, pAudioStreamer, static_cast<uint8_t *>(frame.data), frame.datalen);
                     }
                 }
                 
@@ -1499,57 +1526,37 @@ extern "C" {
                 switch_frame_t frame = {};
                 frame.data = data;
                 frame.buflen = SWITCH_RECOMMENDED_BUFFER_SIZE;
-                const size_t available = switch_buffer_freespace(tech_pvt->sbuffer);
 
                 while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
                     if(frame.datalen) {
                         spx_uint32_t in_len = frame.samples;
-                        spx_uint32_t out_len = (available / (tech_pvt->channels * sizeof(spx_int16_t)));
-                        spx_int16_t out[available / sizeof(spx_int16_t)];
+                        const size_t packet_bytes = switch_buffer_freespace(tech_pvt->sbuffer) + switch_buffer_inuse(tech_pvt->sbuffer);
+                        std::vector<spx_int16_t> out(packet_bytes / sizeof(spx_int16_t));
+                        spx_uint32_t out_len = (packet_bytes / (tech_pvt->channels * sizeof(spx_int16_t)));
 
                         if(tech_pvt->channels == 1) {
                             speex_resampler_process_int(tech_pvt->resampler,
                                             0,
                                             (const spx_int16_t *)frame.data,
                                             &in_len,
-                                            &out[0],
+                                            out.data(),
                                             &out_len);
                         } else {
                             speex_resampler_process_interleaved_int(tech_pvt->resampler,
                                             (const spx_int16_t *)frame.data,
                                             &in_len,
-                                            &out[0],
+                                            out.data(),
                                             &out_len);
                         }
 
                         if(out_len > 0) {
                             const size_t bytes_written = out_len * tech_pvt->channels * sizeof(spx_int16_t);
-                            if (tech_pvt->rtp_packets == 1) { //20ms packet
-                                pAudioStreamer->writeBinary((uint8_t *) out, bytes_written);
-                                continue;
-                            }
-                            if (bytes_written <= available) {
-                                switch_buffer_write(tech_pvt->sbuffer, (const uint8_t *)out, bytes_written);
-                            } else {
-                                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
-                                    "(%s) stream_frame: 重采样后缓冲区空间不足，丢弃 %zu 字节 (可用: %zu)\n",
-                                    tech_pvt->sessionId, bytes_written, available);
-                            }
+                            queue_audio_chunk(tech_pvt, pAudioStreamer, reinterpret_cast<uint8_t *>(out.data()), bytes_written);
                         } else {
                             if (in_len > 0) {  // 只在有输入但无输出时记录
                                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
                                     "(%s) stream_frame: 重采样输出为空 (输入样本: %u)\n",
                                     tech_pvt->sessionId, in_len);
-                            }
-                        }
-
-                        if(switch_buffer_freespace(tech_pvt->sbuffer) == 0) {
-                            switch_size_t inuse = switch_buffer_inuse(tech_pvt->sbuffer);
-                            if (inuse > 0) {
-                                std::vector<uint8_t> tmp(inuse);
-                                switch_buffer_read(tech_pvt->sbuffer, tmp.data(), inuse);
-                                switch_buffer_zero(tech_pvt->sbuffer);
-                                pAudioStreamer->writeBinary(tmp.data(), inuse);
                             }
                         }
                     }
@@ -1585,6 +1592,7 @@ extern "C" {
 
             auto* audioStreamer = (AudioStreamer *) tech_pvt->pAudioStreamer;
             if(audioStreamer) {
+                flush_pending_audio(tech_pvt, audioStreamer);
                 audioStreamer->deleteFiles();
                 if (text) audioStreamer->writeText(text);
                 finish(tech_pvt);
