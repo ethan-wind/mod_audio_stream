@@ -1415,7 +1415,7 @@ extern "C" {
         bool suppressLog = false;
         const char* buffer_size;
         const char* extra_headers;
-        int rtp_packets = 10; //200ms burst (10 * 20ms)
+        int rtp_packets = 5; //100ms burst (5 * 20ms)
         bool no_reconnect = false;
         const char* tls_cafile = NULL;;
         const char* tls_keyfile = NULL;;
@@ -1500,6 +1500,9 @@ extern "C" {
             auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
 
             if (!pAudioStreamer->isConnected()) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "(%s) stream_frame: WebSocket 未连接，跳过音频帧\n",
+                    tech_pvt->sessionId);
                 switch_mutex_unlock(tech_pvt->mutex);
                 return SWITCH_TRUE;
             }
