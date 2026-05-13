@@ -186,6 +186,10 @@ public:
         });
 
         client.setCloseCallback([this](int code, const std::string &reason) {
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_INFO,
+                "(%s) WebSocket disconnected, code: %d, reason: %s\n",
+                m_sessionId.c_str(), code, reason.empty() ? "none" : reason.c_str());
+
             cJSON *root, *message;
             root = cJSON_CreateObject();
             cJSON_AddStringToObject(root, "status", "disconnected");
