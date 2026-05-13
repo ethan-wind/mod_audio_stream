@@ -312,9 +312,9 @@ public:
 
                 // 只在缓冲区从空变为有数据时记录日志（表示新音频流开始）
                 if (buffer_inuse == 0 && new_inuse > 0) {
-                    switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
-                        "(%s) 开始播放新音频流，缓冲区: %.2f ms (打断计数: %u)\n",
-                        m_sessionId.c_str(), buffer_ms, tech_pvt->interrupt_count);
+                    // switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(psession), SWITCH_LOG_INFO,
+                    //    "(%s) 开始播放新音频流，缓冲区: %.2f ms (打断计数: %u)\n",
+                    //    m_sessionId.c_str(), buffer_ms, tech_pvt->interrupt_count);
 
                     // 重置打断计数器（新音频流开始）
                     if (switch_time_now() - tech_pvt->last_interrupt_time > 2000000) {  // 2秒后重置
