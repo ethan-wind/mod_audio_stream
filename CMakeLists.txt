@@ -11,7 +11,7 @@ set(CMAKE_SHARED_LIBRARY_PREFIX "")
 set(CMAKE_C_FLAGS_DEBUG "${CMAKE_C_FLAGS_DEBUG} -g")
 
 option(ENABLE_LOCAL "Enable local compile/debug specific" OFF)
-option(USE_TLS "Enable TLS support for wss:// websocket connections" ON)
+
 if(ENABLE_LOCAL)
     set(ENV{PKG_CONFIG_PATH} "/usr/local/freeswitch/lib/pkgconfig:$ENV{PKG_CONFIG_PATH}")
 endif()

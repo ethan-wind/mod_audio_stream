@@ -42,7 +42,7 @@ cmake -DCMAKE_BUILD_TYPE=Release -DUSE_TLS=ON ..
 make
 sudo make install
 ```
-TLS support is enabled by default in this project build, so both `ws://` and `wss://` URLs are supported. Use `-DUSE_TLS=OFF` only if you want to build without WSS support.
+**TLS** is `OFF` by default. To build with TLS support add `-DUSE_TLS=ON` to cmake line.
 
 #### DEB Package
 To build DEB package after making the module:
