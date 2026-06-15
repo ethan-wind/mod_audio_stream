@@ -1,6 +1,7 @@
 #ifndef MOD_AUDIO_STREAM_H
 #define MOD_AUDIO_STREAM_H
 
+#include <stdio.h>
 #include <switch.h>
 #include <speex/speex_resampler.h>
 
@@ -8,6 +9,7 @@
 #define MAX_SESSION_ID (256)
 #define MAX_WS_URI (4096)
 #define MAX_METADATA_LEN (8192)
+#define MAX_RECORD_PATH (4096)
 
 #define EVENT_CONNECT           "mod_audio_stream::connect"
 #define EVENT_DISCONNECT        "mod_audio_stream::disconnect"
@@ -47,6 +49,20 @@ struct private_data {
     // 播放线程支持
     switch_thread_t *play_thread;      // 播放线程
     int play_thread_running:1;         // 播放线程运行标志
+
+    // 模块内录音：左声道=客户上行，右声道=TTS 下行，默认关闭
+    switch_mutex_t *record_mutex;
+    switch_buffer_t *record_read_buffer;
+    FILE *record_file;
+    char record_path[MAX_RECORD_PATH];
+    uint32_t record_rate;
+    uint32_t record_channels;
+    uint64_t record_data_bytes;
+    uint64_t record_frame_count;
+    uint64_t record_dropped_bytes;
+    int record_enabled:1;
+    int record_failed:1;
+    int record_stereo:1;
 };
 
 typedef struct private_data private_t;

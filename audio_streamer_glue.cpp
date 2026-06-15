@@ -6,6 +6,8 @@
 #include <switch_json.h>
 #include <fstream>
 #include <switch_buffer.h>
+#include <cstdio>
+#include <cinttypes>
 #include <vector>
 #include <unordered_map>
 #include <unordered_set>
@@ -15,6 +17,10 @@
 
 // G.711 A-law encoding - Standard ITU-T G.711 implementation
 namespace {
+    constexpr uint32_t RECORD_BITS_PER_SAMPLE = 16;
+    constexpr uint32_t RECORD_BYTES_PER_SAMPLE = RECORD_BITS_PER_SAMPLE / 8;
+    constexpr uint32_t RECORD_MAX_BUFFER_MS = 5000;
+
     // 小端序写入辅助函数
     inline void write_le16(std::ofstream& file, uint16_t value) {
         uint8_t bytes[2];
@@ -83,6 +89,251 @@ namespace {
             }
             return aval ^ mask;
         }
+    }
+
+    inline void write_u16_le(FILE *file, uint16_t value) {
+        uint8_t bytes[2];
+        bytes[0] = static_cast<uint8_t>(value & 0xFF);
+        bytes[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        fwrite(bytes, 1, sizeof(bytes), file);
+    }
+
+    inline void write_u32_le(FILE *file, uint32_t value) {
+        uint8_t bytes[4];
+        bytes[0] = static_cast<uint8_t>(value & 0xFF);
+        bytes[1] = static_cast<uint8_t>((value >> 8) & 0xFF);
+        bytes[2] = static_cast<uint8_t>((value >> 16) & 0xFF);
+        bytes[3] = static_cast<uint8_t>((value >> 24) & 0xFF);
+        fwrite(bytes, 1, sizeof(bytes), file);
+    }
+
+    void write_record_wav_header(FILE *file, uint32_t sample_rate, uint32_t channels, uint32_t data_bytes) {
+        const uint32_t byte_rate = sample_rate * channels * RECORD_BYTES_PER_SAMPLE;
+        const uint16_t block_align = static_cast<uint16_t>(channels * RECORD_BYTES_PER_SAMPLE);
+        const uint32_t riff_size = 36 + data_bytes;
+
+        rewind(file);
+        fwrite("RIFF", 1, 4, file);
+        write_u32_le(file, riff_size);
+        fwrite("WAVE", 1, 4, file);
+        fwrite("fmt ", 1, 4, file);
+        write_u32_le(file, 16);
+        write_u16_le(file, 1);
+        write_u16_le(file, static_cast<uint16_t>(channels));
+        write_u32_le(file, sample_rate);
+        write_u32_le(file, byte_rate);
+        write_u16_le(file, block_align);
+        write_u16_le(file, RECORD_BITS_PER_SAMPLE);
+        fwrite("data", 1, 4, file);
+        write_u32_le(file, data_bytes);
+    }
+
+    bool create_parent_dirs(const char *path, switch_memory_pool_t *pool) {
+        if (!path || !*path) {
+            return false;
+        }
+
+        std::string full_path(path);
+        const std::string::size_type pos = full_path.find_last_of("/\\");
+        if (pos == std::string::npos) {
+            return true;
+        }
+
+        const std::string dir = full_path.substr(0, pos);
+        if (dir.empty()) {
+            return true;
+        }
+
+        if (switch_directory_exists(dir.c_str(), pool) == SWITCH_STATUS_SUCCESS) {
+            return true;
+        }
+
+        return switch_dir_make_recursive(dir.c_str(), SWITCH_DEFAULT_DIR_PERMS, pool) == SWITCH_STATUS_SUCCESS;
+    }
+
+    void disable_recording(private_t *tech_pvt) {
+        if (!tech_pvt) {
+            return;
+        }
+
+        if (tech_pvt->record_file) {
+            fclose(tech_pvt->record_file);
+            tech_pvt->record_file = nullptr;
+        }
+
+        tech_pvt->record_enabled = 0;
+        tech_pvt->record_failed = 1;
+    }
+
+    void close_recording(private_t *tech_pvt) {
+        if (!tech_pvt || !tech_pvt->record_file) {
+            return;
+        }
+
+        write_record_wav_header(tech_pvt->record_file,
+                                tech_pvt->record_rate,
+                                tech_pvt->record_channels,
+                                static_cast<uint32_t>(tech_pvt->record_data_bytes));
+        fflush(tech_pvt->record_file);
+        fclose(tech_pvt->record_file);
+        tech_pvt->record_file = nullptr;
+    }
+
+    bool init_recording(private_t *tech_pvt, switch_core_session_t *session, switch_channel_t *channel, switch_memory_pool_t *pool) {
+        const char *record_path = switch_channel_get_variable(channel, "AUDIO_STREAM_RECORD_PATH");
+        if (!record_path || !*record_path) {
+            return true;
+        }
+
+        if (tech_pvt->channels != 1) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_WARNING,
+                              "(%s) AUDIO_STREAM_RECORD_PATH 已设置，但当前仅支持单声道通话录音，已跳过\n",
+                              tech_pvt->sessionId);
+            tech_pvt->record_failed = 1;
+            return true;
+        }
+
+        const size_t path_len = strlen(record_path);
+        if (path_len >= MAX_RECORD_PATH) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "(%s) AUDIO_STREAM_RECORD_PATH 过长，已跳过模块内录音\n",
+                              tech_pvt->sessionId);
+            tech_pvt->record_failed = 1;
+            return true;
+        }
+
+        if (!create_parent_dirs(record_path, pool)) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "(%s) 创建录音目录失败: %s\n",
+                              tech_pvt->sessionId, record_path);
+            tech_pvt->record_failed = 1;
+            return true;
+        }
+
+        FILE *file = fopen(record_path, "wb");
+        if (!file) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "(%s) 打开录音文件失败: %s\n",
+                              tech_pvt->sessionId, record_path);
+            tech_pvt->record_failed = 1;
+            return true;
+        }
+
+        const size_t max_buffer_bytes = static_cast<size_t>(
+            (static_cast<uint64_t>(tech_pvt->sampling) * RECORD_BYTES_PER_SAMPLE * RECORD_MAX_BUFFER_MS) / 1000);
+        if (switch_buffer_create_dynamic(&tech_pvt->record_read_buffer, 512, max_buffer_bytes, max_buffer_bytes) != SWITCH_STATUS_SUCCESS) {
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "(%s) 创建录音缓存失败，已跳过模块内录音\n",
+                              tech_pvt->sessionId);
+            fclose(file);
+            tech_pvt->record_failed = 1;
+            return true;
+        }
+
+        tech_pvt->record_file = file;
+        tech_pvt->record_rate = tech_pvt->sampling;
+        tech_pvt->record_stereo = switch_channel_var_true(channel, "AUDIO_STREAM_RECORD_STEREO") ? 1 : 0;
+        tech_pvt->record_channels = tech_pvt->record_stereo ? 2 : 1;
+        tech_pvt->record_data_bytes = 0;
+        tech_pvt->record_frame_count = 0;
+        tech_pvt->record_dropped_bytes = 0;
+        strncpy(tech_pvt->record_path, record_path, MAX_RECORD_PATH - 1);
+        tech_pvt->record_path[MAX_RECORD_PATH - 1] = '\0';
+
+        switch_mutex_init(&tech_pvt->record_mutex, SWITCH_MUTEX_NESTED, pool);
+        write_record_wav_header(tech_pvt->record_file, tech_pvt->record_rate, tech_pvt->record_channels, 0);
+        fflush(tech_pvt->record_file);
+        tech_pvt->record_enabled = 1;
+
+        switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                          "(%s) 模块内录音已启用: %s (%s wav, %u Hz)\n",
+                          tech_pvt->sessionId,
+                          tech_pvt->record_path,
+                          tech_pvt->record_stereo ? "stereo" : "mono-mix",
+                          tech_pvt->record_rate);
+        return true;
+    }
+
+    void append_record_read_audio(private_t *tech_pvt, const uint8_t *data, size_t len) {
+        if (!tech_pvt || !tech_pvt->record_enabled || !tech_pvt->record_mutex || !tech_pvt->record_read_buffer || !data || !len) {
+            return;
+        }
+
+        switch_mutex_lock(tech_pvt->record_mutex);
+
+        size_t free_space = switch_buffer_freespace(tech_pvt->record_read_buffer);
+        if (free_space < len) {
+            const size_t drop_bytes = len - free_space;
+            const size_t dropped = switch_buffer_toss(tech_pvt->record_read_buffer, drop_bytes);
+            tech_pvt->record_dropped_bytes += dropped;
+            if (dropped > 0) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                                  "(%s) 录音上行缓存不足，丢弃最旧 %zu 字节\n",
+                                  tech_pvt->sessionId, dropped);
+            }
+        }
+
+        const size_t written = switch_buffer_write(tech_pvt->record_read_buffer, data, len);
+        if (written != len) {
+            tech_pvt->record_dropped_bytes += (len - written);
+            switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                              "(%s) 录音上行缓存写入不完整，写入 %zu/%zu 字节\n",
+                              tech_pvt->sessionId, written, len);
+        }
+
+        switch_mutex_unlock(tech_pvt->record_mutex);
+    }
+
+    void write_record_frame(private_t *tech_pvt, switch_core_session_t *session, const uint8_t *tts_data, size_t target_bytes) {
+        if (!tech_pvt || !tech_pvt->record_enabled || tech_pvt->record_failed || !tech_pvt->record_mutex || !tech_pvt->record_file || !tts_data || !target_bytes) {
+            return;
+        }
+
+        int16_t caller[SWITCH_RECOMMENDED_BUFFER_SIZE / sizeof(int16_t)] = {0};
+        int16_t mixed[SWITCH_RECOMMENDED_BUFFER_SIZE / sizeof(int16_t)] = {0};
+        int16_t stereo[(SWITCH_RECOMMENDED_BUFFER_SIZE / sizeof(int16_t)) * 2] = {0};
+        const size_t sample_count = target_bytes / sizeof(int16_t);
+
+        switch_mutex_lock(tech_pvt->record_mutex);
+
+        const size_t read_bytes = switch_buffer_read(tech_pvt->record_read_buffer, caller, target_bytes);
+        if (read_bytes < target_bytes) {
+            memset(reinterpret_cast<uint8_t *>(caller) + read_bytes, 0, target_bytes - read_bytes);
+        }
+
+        const int16_t *tts_samples = reinterpret_cast<const int16_t *>(tts_data);
+        size_t write_bytes = 0;
+
+        if (tech_pvt->record_stereo) {
+            for (size_t i = 0; i < sample_count; ++i) {
+                stereo[i * 2] = caller[i];
+                stereo[i * 2 + 1] = tts_samples[i];
+            }
+            write_bytes = target_bytes * 2;
+        } else {
+            for (size_t i = 0; i < sample_count; ++i) {
+                int32_t sum = static_cast<int32_t>(caller[i]) + static_cast<int32_t>(tts_samples[i]);
+                if (sum > 32767) sum = 32767;
+                if (sum < -32768) sum = -32768;
+                mixed[i] = static_cast<int16_t>(sum);
+            }
+            write_bytes = target_bytes;
+        }
+
+        const void *write_data = tech_pvt->record_stereo ? static_cast<const void *>(stereo) : static_cast<const void *>(mixed);
+        const size_t written = fwrite(write_data, 1, write_bytes, tech_pvt->record_file);
+        if (written != write_bytes) {
+            switch_mutex_unlock(tech_pvt->record_mutex);
+            switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_ERROR,
+                              "(%s) 写入录音文件失败，已停止模块内录音: %s\n",
+                              tech_pvt->sessionId, tech_pvt->record_path);
+            disable_recording(tech_pvt);
+            return;
+        }
+
+        tech_pvt->record_data_bytes += written;
+        tech_pvt->record_frame_count++;
+        switch_mutex_unlock(tech_pvt->record_mutex);
     }
 }
 
@@ -1021,6 +1272,7 @@ namespace {
         int err; //speex
 
         switch_memory_pool_t *pool = switch_core_session_get_pool(session);
+        switch_channel_t *channel = switch_core_session_get_channel(session);
 
         memset(tech_pvt, 0, sizeof(private_t));
 
@@ -1107,6 +1359,8 @@ namespace {
                 "(%s) 上行无需重采样: %u Hz\n", tech_pvt->sessionId, sampling);
         }
 
+        init_recording(tech_pvt, session, channel, pool);
+
         return SWITCH_STATUS_SUCCESS;
     }
 
@@ -1128,6 +1382,17 @@ namespace {
         if (tech_pvt->play_buffer) {
             switch_buffer_destroy(&tech_pvt->play_buffer);
             tech_pvt->play_buffer = nullptr;
+        }
+        if (tech_pvt->record_read_buffer) {
+            switch_buffer_destroy(&tech_pvt->record_read_buffer);
+            tech_pvt->record_read_buffer = nullptr;
+        }
+        if (tech_pvt->record_file) {
+            close_recording(tech_pvt);
+        }
+        if (tech_pvt->record_mutex) {
+            switch_mutex_destroy(tech_pvt->record_mutex);
+            tech_pvt->record_mutex = nullptr;
         }
         if (tech_pvt->pAudioStreamer) {
             auto* as = (AudioStreamer *) tech_pvt->pAudioStreamer;
@@ -1204,19 +1469,19 @@ extern "C" {
 
         bool injected = false;
         bool playback_ended = false;
-        size_t start_inuse = 0;
+        bool playback_paused = false;
         size_t read_size = 0;
+        uint8_t record_tts_buf[SWITCH_RECOMMENDED_BUFFER_SIZE];
+        bool should_record_frame = false;
+
+        memset(record_tts_buf, 0, target_bytes);
 
         switch_mutex_lock(tech_pvt->play_mutex);
-        if (tech_pvt->playback_paused) {
-            switch_mutex_unlock(tech_pvt->play_mutex);
-            return;
-        }
+        playback_paused = (tech_pvt->playback_paused != 0);
 
         size_t inuse = switch_buffer_inuse(tech_pvt->play_buffer);
-        start_inuse = inuse;
 
-        if (inuse > 0) {
+        if (!playback_paused && inuse > 0) {
             read_size = target_bytes;
             if (inuse < read_size) {
                 read_size = inuse;
@@ -1229,6 +1494,8 @@ extern "C" {
 
             // 从缓冲区读取 TTS 的 16-bit Linear PCM 数据
             switch_buffer_read(tech_pvt->play_buffer, tts_buf, read_size);
+            memcpy(record_tts_buf, tts_buf, target_bytes);
+            should_record_frame = true;
             injected = true;
 
             // 将 TTS 音频与原始帧（背景音）做饱和混音
@@ -1258,13 +1525,21 @@ extern "C" {
             }
         } else {
             // 缓冲区为空
-            if (tech_pvt->last_buffer_inuse > 0) {
+            if (!playback_paused && tech_pvt->last_buffer_inuse > 0) {
                 playback_ended = true;
                 tech_pvt->last_buffer_inuse = 0;
             }
         }
     
         switch_mutex_unlock(tech_pvt->play_mutex);
+
+        if (!should_record_frame && tech_pvt->record_enabled && !tech_pvt->record_failed) {
+            should_record_frame = true;
+        }
+
+        if (should_record_frame) {
+            write_record_frame(tech_pvt, session, record_tts_buf, target_bytes);
+        }
 
         if (playback_ended) {
 
@@ -1493,8 +1768,11 @@ extern "C" {
         if (!tech_pvt || tech_pvt->audio_paused) return SWITCH_TRUE;
         
         if (switch_mutex_trylock(tech_pvt->mutex) == SWITCH_STATUS_SUCCESS) {
+            auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
+            const bool ws_connected = (pAudioStreamer && pAudioStreamer->isConnected());
+            const bool record_only_mode = (tech_pvt->record_enabled && !ws_connected);
 
-            if (!tech_pvt->pAudioStreamer) {
+            if (!pAudioStreamer && !tech_pvt->record_enabled) {
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
                     "(%s) stream_frame: pAudioStreamer 为空，跳过本次音频帧\n",
                     tech_pvt->sessionId);
@@ -1502,9 +1780,7 @@ extern "C" {
                 return SWITCH_TRUE;
             }
 
-            auto *pAudioStreamer = static_cast<AudioStreamer *>(tech_pvt->pAudioStreamer);
-
-            if (!pAudioStreamer->isConnected()) {
+            if (!ws_connected && !tech_pvt->record_enabled) {
                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
                     "(%s) stream_frame: WebSocket 未连接，跳过音频帧\n",
                     tech_pvt->sessionId);
@@ -1521,7 +1797,10 @@ extern "C" {
 
                 while (switch_core_media_bug_read(bug, &frame, SWITCH_TRUE) == SWITCH_STATUS_SUCCESS) {
                     if (frame.datalen) {
-                        queue_audio_chunk(tech_pvt, pAudioStreamer, static_cast<uint8_t *>(frame.data), frame.datalen);
+                        append_record_read_audio(tech_pvt, static_cast<const uint8_t *>(frame.data), frame.datalen);
+                        if (!record_only_mode) {
+                            queue_audio_chunk(tech_pvt, pAudioStreamer, static_cast<uint8_t *>(frame.data), frame.datalen);
+                        }
                     }
                 }
                 
@@ -1556,7 +1835,10 @@ extern "C" {
 
                         if(out_len > 0) {
                             const size_t bytes_written = out_len * tech_pvt->channels * sizeof(spx_int16_t);
-                            queue_audio_chunk(tech_pvt, pAudioStreamer, reinterpret_cast<uint8_t *>(out.data()), bytes_written);
+                            append_record_read_audio(tech_pvt, reinterpret_cast<const uint8_t *>(out.data()), bytes_written);
+                            if (!record_only_mode) {
+                                queue_audio_chunk(tech_pvt, pAudioStreamer, reinterpret_cast<uint8_t *>(out.data()), bytes_written);
+                            }
                         } else {
                             if (in_len > 0) {  // 只在有输入但无输出时记录
                                 switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
@@ -1566,6 +1848,16 @@ extern "C" {
                         }
                     }
                 }
+            }
+
+            if (!pAudioStreamer && tech_pvt->record_enabled) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "(%s) stream_frame: pAudioStreamer 为空，仅保留本地录音缓存\n",
+                    tech_pvt->sessionId);
+            } else if (!ws_connected && tech_pvt->record_enabled) {
+                switch_log_printf(SWITCH_CHANNEL_LOG, SWITCH_LOG_WARNING,
+                    "(%s) stream_frame: WebSocket 未连接，仅保留本地录音缓存\n",
+                    tech_pvt->sessionId);
             }
             
             switch_mutex_unlock(tech_pvt->mutex);
@@ -1601,6 +1893,18 @@ extern "C" {
                 audioStreamer->deleteFiles();
                 if (text) audioStreamer->writeText(text);
                 finish(tech_pvt);
+            }
+
+            if (tech_pvt->record_enabled || tech_pvt->record_failed) {
+                switch_log_printf(SWITCH_CHANNEL_SESSION_LOG(session), SWITCH_LOG_INFO,
+                                  "(%s) 模块内录音结束: path=%s, frames=%" PRIu64 ", data_bytes=%" PRIu64 ", dropped_bytes=%" PRIu64 ", enabled=%d, failed=%d\n",
+                                  sessionId,
+                                  tech_pvt->record_path[0] ? tech_pvt->record_path : "(none)",
+                                  tech_pvt->record_frame_count,
+                                  tech_pvt->record_data_bytes,
+                                  tech_pvt->record_dropped_bytes,
+                                  tech_pvt->record_enabled,
+                                  tech_pvt->record_failed);
             }
 
             destroy_tech_pvt(tech_pvt);
